@@ -10,7 +10,7 @@
 
 import { useEffect, useRef, useState, type ReactNode } from 'react';
 
-import { Check, Download, ImageDown, Link2 } from 'lucide-react';
+import { BookOpen, Check, Download, ImageDown, Link2 } from 'lucide-react';
 
 import {
   Dialog,
@@ -28,6 +28,8 @@ export interface ShareSheetProps {
   title: string;
   /** Optional — row hidden when not provided (e.g. shelf mode). */
   onExportPage?: () => void;
+  /** Optional — two-page spread PNG (open mode only). */
+  onExportSpread?: () => void;
   onExportJournal: () => void;
   /** Copies location.href in the parent; the sheet shows "Copied!" feedback. */
   onCopyLink: () => void;
@@ -72,6 +74,7 @@ export function ShareSheet({
   onOpenChange,
   title,
   onExportPage,
+  onExportSpread,
   onExportJournal,
   onCopyLink,
 }: ShareSheetProps) {
@@ -123,6 +126,13 @@ export function ShareSheet({
               icon={<ImageDown className="size-4" />}
               label="Export current page as PNG"
               onClick={onExportPage}
+            />
+          )}
+          {onExportSpread && (
+            <ShareRow
+              icon={<BookOpen className="size-4" />}
+              label="Export open spread as PNG"
+              onClick={onExportSpread}
             />
           )}
           <ShareRow

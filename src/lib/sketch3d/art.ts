@@ -266,6 +266,31 @@ export function drawCoverArt(ctx: CanvasRenderingContext2D, style: CoverStyle, w
 export function makeCoverTexture(style: CoverStyle): THREE.CanvasTexture {
   const [canvas, ctx] = makeCanvas(COVER_TEX_W, COVER_TEX_H);
   drawCoverArt(ctx, style, COVER_TEX_W, COVER_TEX_H);
+
+  // subtle diagonal light sheen — gives the cover a printed, laminated feel
+  const sheen = ctx.createLinearGradient(0, 0, COVER_TEX_W, COVER_TEX_H);
+  sheen.addColorStop(0, 'rgba(255,255,255,0.10)');
+  sheen.addColorStop(0.35, 'rgba(255,255,255,0.02)');
+  sheen.addColorStop(0.55, 'rgba(255,255,255,0)');
+  sheen.addColorStop(0.8, 'rgba(255,255,255,0.05)');
+  sheen.addColorStop(1, 'rgba(255,255,255,0.12)');
+  ctx.fillStyle = sheen;
+  ctx.fillRect(0, 0, COVER_TEX_W, COVER_TEX_H);
+
+  // gentle edge darkening (contact shading against the cardboard below)
+  const vig = ctx.createRadialGradient(
+    COVER_TEX_W / 2,
+    COVER_TEX_H / 2,
+    COVER_TEX_H * 0.2,
+    COVER_TEX_W / 2,
+    COVER_TEX_H / 2,
+    COVER_TEX_H * 0.75,
+  );
+  vig.addColorStop(0, 'rgba(0,0,0,0)');
+  vig.addColorStop(1, 'rgba(0,0,0,0.10)');
+  ctx.fillStyle = vig;
+  ctx.fillRect(0, 0, COVER_TEX_W, COVER_TEX_H);
+
   const tex = new THREE.CanvasTexture(canvas);
   tex.colorSpace = THREE.SRGBColorSpace;
   tex.anisotropy = 4;
@@ -340,6 +365,24 @@ export function getShadowBlobTexture(): THREE.CanvasTexture {
   blobTex = new THREE.CanvasTexture(canvas);
   blobTex.colorSpace = THREE.SRGBColorSpace;
   return blobTex;
+}
+
+let poolTex: THREE.CanvasTexture | null = null;
+/** Wide, soft pool of warm light under the shelf — grounds the books on the
+ *  floor and adds reading-room atmosphere (elliptical radial gradient). */
+export function makeFloorPoolTexture(): THREE.CanvasTexture {
+  if (poolTex) return poolTex;
+  const S = 256;
+  const [canvas, ctx] = makeCanvas(S, S);
+  const g = ctx.createRadialGradient(S / 2, S / 2, S * 0.04, S / 2, S / 2, S * 0.5);
+  g.addColorStop(0, 'rgba(255,236,200,0.5)');
+  g.addColorStop(0.45, 'rgba(255,232,196,0.16)');
+  g.addColorStop(1, 'rgba(255,232,196,0)');
+  ctx.fillStyle = g;
+  ctx.fillRect(0, 0, S, S);
+  poolTex = new THREE.CanvasTexture(canvas);
+  poolTex.colorSpace = THREE.SRGBColorSpace;
+  return poolTex;
 }
 
 let gutterTex: THREE.CanvasTexture | null = null;

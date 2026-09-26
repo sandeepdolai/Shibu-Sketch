@@ -10,7 +10,7 @@
 
 import { useState, type ReactNode } from 'react';
 
-import { Copy, FileMinus, ImageDown, Info, Pencil, Plus, Trash2 } from 'lucide-react';
+import { Copy, CopyPlus, FileMinus, FileUp, ImageDown, Info, Pencil, Plus, Trash2 } from 'lucide-react';
 
 import {
   AlertDialog,
@@ -48,6 +48,10 @@ export interface JournalMenuProps {
   /** Open-mode page management (hidden when absent). */
   onAddPage?: () => void;
   onDeletePage?: () => void;
+  /** Open-mode page copy (hidden when absent). */
+  onDuplicatePage?: () => void;
+  /** Shelf-mode JSON import (hidden when absent). */
+  onImport?: () => void;
   onAbout: () => void;
 }
 
@@ -92,6 +96,8 @@ export function JournalMenu({
   onExportPng,
   onAddPage,
   onDeletePage,
+  onDuplicatePage,
+  onImport,
   onAbout,
 }: JournalMenuProps) {
   const [confirming, setConfirming] = useState<'journal' | 'page' | null>(null);
@@ -142,6 +148,13 @@ export function JournalMenu({
               onClick={() => runAndClose(onDuplicate)}
             />
           )}
+          {onImport && (
+            <MenuAction
+              icon={<FileUp className="size-4" />}
+              label="Import journal backup…"
+              onClick={() => runAndClose(onImport)}
+            />
+          )}
           {onExportPng && (
             <MenuAction
               icon={<ImageDown className="size-4" />}
@@ -154,6 +167,13 @@ export function JournalMenu({
               icon={<Plus className="size-4" />}
               label="Add page after this spread"
               onClick={() => runAndClose(onAddPage)}
+            />
+          )}
+          {onDuplicatePage && (
+            <MenuAction
+              icon={<CopyPlus className="size-4" />}
+              label="Duplicate current page"
+              onClick={() => runAndClose(onDuplicatePage)}
             />
           )}
           {onDeletePage && (

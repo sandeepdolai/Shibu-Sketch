@@ -932,3 +932,64 @@ export function contentToDataURL(
 ): string {
   return renderPageContentToCanvas(content, cssW, cssH, paperColor).toDataURL('image/png');
 }
+
+/**
+ * PNG data URL of an open two-page spread (2× scale).
+ *
+ * Renders left + right pages side by side with a small gutter shadow, like
+ * photographing the open book. If one side is missing (short journals) it is
+ * drawn as blank paper. Needs a DOM; images must be primed.
+ */
+export function spreadToDataURL(
+  left: PageContent | null,
+  right: PageContent | null,
+  cssW: number,
+  cssH: number,
+  paperColor?: string,
+): string {
+  const scale = 2;
+  const gutter = Math.round(cssW * 0.06);
+  const canvas = document.createElement('canvas');
+  canvas.width = Math.round((cssW * 2 + gutter) * scale);
+  canvas.height = Math.round(cssH * scale);
+  const ctx = canvas.getContext('2d');
+  if (!ctx) return '';
+  ctx.scale(scale, scale);
+
+  const blank: PageContent = { strokes: [], texts: [], stickers: [], photos: [] };
+  const paper = paperColorOf(left ?? right ?? blank, { paperColor });
+
+  // shared backdrop behind the gutter
+  ctx.fillStyle = paper;
+  ctx.fillRect(0, 0, canvas.width / scale, canvas.height / scale);
+
+  const drawSide = (content: PageContent | null, x: number) => {
+    ctx.save();
+    ctx.translate(x, 0);
+    ctx.beginPath();
+    ctx.rect(0, 0, cssW, cssH);
+    ctx.clip();
+    if (content) {
+      renderPageContent(ctx, content, cssW, cssH, { paperColor });
+    } else {
+      ctx.fillStyle = paper;
+      ctx.fillRect(0, 0, cssW, cssH);
+      drawPaperNoise(ctx, cssW, cssH);
+    }
+    ctx.restore();
+  };
+  drawSide(left, 0);
+  drawSide(right, cssW + gutter);
+
+  // gutter contact shadow (dark strip fading outward, reading-room feel)
+  const gx = cssW + gutter / 2;
+  const shadowW = gutter * 1.6;
+  const grad = ctx.createLinearGradient(gx - shadowW / 2, 0, gx + shadowW / 2, 0);
+  grad.addColorStop(0, 'rgba(0,0,0,0)');
+  grad.addColorStop(0.5, 'rgba(60,44,20,0.18)');
+  grad.addColorStop(1, 'rgba(0,0,0,0)');
+  ctx.fillStyle = grad;
+  ctx.fillRect(gx - shadowW / 2, 0, shadowW, cssH);
+
+  return canvas.toDataURL('image/png');
+}

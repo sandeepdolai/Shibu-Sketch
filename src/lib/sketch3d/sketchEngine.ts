@@ -22,7 +22,7 @@ import {
   type PageTextureProvider,
 } from './journalObject';
 import { bendSheet } from './sheetGeom';
-import { getShadowBlobTexture, getGutterShadowTexture, makeCoverTexture } from './art';
+import { getShadowBlobTexture, getGutterShadowTexture, makeCoverTexture, makeFloorPoolTexture } from './art';
 import { renderPageContentToCanvas } from '@/lib/sketch/render';
 import type { JournalDTO, JournalDetailDTO, PageContent } from '@/lib/sketch/types';
 import { parsePageContent } from '@/lib/sketch/types';
@@ -99,6 +99,9 @@ export class SketchEngine {
   private pageCount = 0;
   private spread = 0;
   private transitionStart = 0;
+  /** neighbor slide-away start poses, captured at openJournal/closeJournal so
+   *  the interpolation always converges no matter how far the shelf was scrolled */
+  private slideStart = new Map<string, { x: number; y: number; blob: number }>();
   private flip: FlipState = { active: false, dir: 1, from: 0, start: 0 };
   private spreadTween: SpreadTween = { active: false, from: 0, to: 0, start: 0 };
   private static readonly TWEEN_DUR = 0.34;
@@ -184,6 +187,16 @@ export class SketchEngine {
     floor.receiveShadow = true;
     this.scene.add(floor);
 
+    // wide, soft pool of warm light grounding the shelf (reading-room feel)
+    const poolTex = makeFloorPoolTexture();
+    const pool = new THREE.Mesh(
+      new THREE.PlaneGeometry(14, 4.6),
+      new THREE.MeshBasicMaterial({ map: poolTex, transparent: true, depthWrite: false, opacity: 0.55 }),
+    );
+    pool.rotation.x = -HALF_PI;
+    pool.position.set(0, 0.002, 0.35);
+    this.scene.add(pool);
+
     this.textures = {
       getPageTexture: (idx) => this.pageTexture(idx, 'right'),
       getLeftTexture: (idx) => this.pageTexture(idx, 'left'),
@@ -245,6 +258,17 @@ export class SketchEngine {
     this.pagesData = detail.pages.map((p) => ({ id: p.id, content: p.content }));
     this.paperColor = detail.paperColor || '#faf8f4';
     this.spread = Math.max(0, Math.min(startSpread, this.spreadCount() - 1));
+    // capture neighbor start poses BEFORE the slide-away so the open
+    // transition converges even when the shelf is mid-scroll (search pick)
+    this.slideStart.clear();
+    for (const [id, j] of this.journals) {
+      if (id === detail.id) continue;
+      this.slideStart.set(id, {
+        x: j.obj.root.position.x,
+        y: j.obj.root.position.y,
+        blob: (j.blob.material as THREE.MeshBasicMaterial).opacity,
+      });
+    }
     this.mode = 'opening';
     this.transitionStart = this.clock.getElapsedTime();
   }
@@ -256,6 +280,16 @@ export class SketchEngine {
     this.flip.active = false;
     this.spreadTween.active = false;
     if (this.openEntry) this.openEntry.obj.flipGroup.visible = false;
+    // capture neighbor start poses for the slide-back interpolation
+    this.slideStart.clear();
+    for (const [id, j] of this.journals) {
+      if (id === this.openEntry?.dto.id) continue;
+      this.slideStart.set(id, {
+        x: j.obj.root.position.x,
+        y: j.obj.root.position.y,
+        blob: (j.blob.material as THREE.MeshBasicMaterial).opacity,
+      });
+    }
   }
 
   /** Rebuild the currently-open journal in place (e.g. after pages were added). */
@@ -280,6 +314,8 @@ export class SketchEngine {
     entry.obj.root.position.set(0, 0, 0);
     entry.obj.root.rotation.set(0, 0, 0);
     entry.obj.root.scale.setScalar(1);
+    // a freshly added journal stands in closed pose — flatten the spine column
+    this.setSpineFlat(entry.obj, 1);
     entry.blob.visible = false;
     this.layoutOpenSpread(this.spread, true);
   }
@@ -428,6 +464,13 @@ export class SketchEngine {
     this.renderer.setSize(w, h, false);
     this.camera.aspect = w / h;
     this.updateCameraFit();
+    if (this.mode === 'open') {
+      // re-fit the reading view to the new aspect (device rotation / window resize)
+      const oc = this.openCamTarget();
+      this.camPos.copy(oc.pos);
+      this.camLook.copy(oc.look);
+      this.camFov = oc.fov;
+    }
     this.camera.updateProjectionMatrix();
   }
 
@@ -796,15 +839,18 @@ export class SketchEngine {
     const obj = entry.obj;
     const root = obj.root;
 
-    // other journals slide away
+    // other journals slide away — absolute interpolation from the captured
+    // start pose so neighbors are fully off-screen by t≈0.7 regardless of
+    // where the shelf scroll was when the open began
     for (const [id, j] of this.journals) {
       if (id === entry.dto.id) continue;
       const idx = this.order.indexOf(id);
       const dirSign = idx < (this.order.indexOf(entry.dto.id) ?? 0) ? -1 : 1;
-      const away = easeInOut(clamp01(t * 1.6));
-      j.obj.root.position.x += ((dirSign * 5.2 - j.obj.root.position.x) * 0.16 * away);
-      j.obj.root.position.y += (-1.6 - j.obj.root.position.y) * 0.14 * away;
-      { const bm = j.blob.material as THREE.MeshBasicMaterial; bm.opacity = Math.max(0, bm.opacity - 0.05 * away); }
+      const st = this.slideStart.get(id);
+      const away = easeInOut(clamp01(t * 1.45));
+      j.obj.root.position.x = lerp(st ? st.x : j.obj.root.position.x, dirSign * 6.0, away);
+      j.obj.root.position.y = lerp(st ? st.y : j.obj.root.position.y, -1.6, away);
+      { const bm = j.blob.material as THREE.MeshBasicMaterial; bm.opacity = Math.max(0, (st ? st.blob : 0.38) - (st ? st.blob : 0.38) * away); }
     }
 
     // phase A lift (0..0.18): root rises a bit more
@@ -938,15 +984,16 @@ export class SketchEngine {
     this.camLook.lerp(targetLook, 0.14);
     this.camFov = lerp(this.camFov, 33, 0.1);
 
-    // other journals return
+    // other journals return — absolute interpolation toward the exact shelf slot
     for (const [id, j] of this.journals) {
       if (id === entry.dto.id) continue;
       const idx = this.order.indexOf(id);
       const tx = (idx - this.scroll) * SHELF_SPACING;
+      const st = this.slideStart.get(id);
       const back = easeInOut(clamp01((t - 0.3) / 0.7));
-      j.obj.root.position.x = lerp(j.obj.root.position.x, tx, back * 0.2);
-      j.obj.root.position.y = lerp(j.obj.root.position.y, SHELF_BASE_Y, back * 0.2);
-      { const bm = j.blob.material as THREE.MeshBasicMaterial; bm.opacity = Math.min(0.5, bm.opacity + 0.03 * back); }
+      j.obj.root.position.x = lerp(st ? st.x : tx, tx, back);
+      j.obj.root.position.y = lerp(st ? st.y : SHELF_BASE_Y, SHELF_BASE_Y, back);
+      { const bm = j.blob.material as THREE.MeshBasicMaterial; const b0 = st ? st.blob : 0; bm.opacity = Math.min(0.5, lerp(b0, 0.38, back)); }
     }
 
     if (t >= 1) {

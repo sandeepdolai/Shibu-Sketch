@@ -103,6 +103,12 @@ export const createJournalSchema = z.object({
   title: z.string().trim().min(1, 'title is required').max(60, 'title too long (max 60)'),
   coverStyle: coverStyleSchema.optional(),
   paperColor: paperColorSchema.optional(),
+  /** Optional initial pages (import/backup restore). Max 200 pages. */
+  pages: z
+    .array(z.object({ content: pageContentSchema }).loose())
+    .min(2, 'a journal needs at least 2 pages')
+    .max(200, 'too many pages (max 200)')
+    .optional(),
 });
 
 export const updateJournalSchema = z.object({

@@ -13,7 +13,7 @@ import dynamic from 'next/dynamic';
 import type { CoverStyle, JournalDTO, JournalDetailDTO, PageContent } from '@/lib/sketch/types';
 import { parsePageContent } from '@/lib/sketch/types';
 import { SketchEngine } from '@/lib/sketch3d/sketchEngine';
-import { contentToDataURL } from '@/lib/sketch/render';
+import { contentToDataURL, spreadToDataURL } from '@/lib/sketch/render';
 import { isSfxMuted, playTap, setSfxMuted } from '@/lib/sketch3d/sfx';
 import { SlidersHorizontal } from 'lucide-react';
 import { useSketchToast } from './Toasts';
@@ -60,6 +60,8 @@ export default function SketchApp() {
   const [renaming, setRenaming] = useState(false);
   const [renameValue, setRenameValue] = useState('');
   const [copied, setCopied] = useState(false);
+  const importFileRef = useRef<HTMLInputElement | null>(null);
+  const [importing, setImporting] = useState(false);
 
   const { toast } = useSketchToast();
 
@@ -479,6 +481,125 @@ export default function SketchApp() {
     }
   }, [detail, renameValue, journals, toast]);
 
+  /** Deep-copy the selected journal (cover + every page) to a new shelf slot. */
+  const duplicateSelected = useCallback(async () => {
+    if (!selected) return;
+    try {
+      const res = await fetch(`/api/sketch/journals/${selected.id}/duplicate`, {
+        method: 'POST',
+      });
+      if (!res.ok) throw new Error();
+      const list = await refreshJournals();
+      const data = await res.json();
+      const copyId = (data.journal as JournalDTO | undefined)?.id;
+      if (copyId) {
+        setSelectedId(copyId);
+        engineRef.current?.selectJournal(copyId);
+      }
+      toast(`“${selected.title}” duplicated`, 'success');
+      return list;
+    } catch {
+      toast('Could not duplicate journal', 'destructive');
+    }
+  }, [selected, refreshJournals, toast]);
+
+  /** Insert a copy of the current page right after itself. */
+  const duplicateCurrentPage = useCallback(async () => {
+    if (!detail) return;
+    const right = spread * 2 + 1;
+    const left = spread * 2;
+    const pageIndex = right < detail.pages.length ? right : left;
+    const page = detail.pages[pageIndex];
+    if (!page) return;
+    try {
+      // 1) insert a blank page after the current one
+      const res = await fetch(`/api/sketch/journals/${detail.id}/pages`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ atIndex: pageIndex + 1 }),
+      });
+      if (!res.ok) throw new Error();
+      const created = (await res.json()) as { page: { id: string } };
+      // 2) fill it with a deep copy of the current page's content
+      await fetch(`/api/sketch/pages/${created.page.id}`, {
+        method: 'PUT',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ content: page.content }),
+      });
+      // 3) refresh detail + engine
+      const r2 = await fetch(`/api/sketch/journals/${detail.id}`, { cache: 'no-store' });
+      const data = (await r2.json()) as { journal: JournalDetailDTO };
+      setDetail(data.journal);
+      engineRef.current?.reloadOpenJournal(data.journal);
+      setJournals((cur) =>
+        cur.map((j) =>
+          j.id === data.journal.id ? { ...j, pageCount: data.journal.pages.length } : j,
+        ),
+      );
+      toast('Page duplicated', 'success');
+    } catch {
+      toast('Could not duplicate page', 'destructive');
+    }
+  }, [detail, spread, toast]);
+
+  /** Restore an exported journal backup (JSON) as a new journal on the shelf. */
+  const importJournalFile = useCallback(
+    async (file: File) => {
+      setImporting(true);
+      try {
+        const raw = JSON.parse(await file.text()) as {
+          title?: unknown;
+          coverStyle?: unknown;
+          paperColor?: unknown;
+          pages?: unknown;
+        };
+        const title =
+          typeof raw.title === 'string' && raw.title.trim()
+            ? raw.title.trim().slice(0, 60)
+            : 'Imported journal';
+        const rawPages = Array.isArray(raw.pages) ? raw.pages : [];
+        const pages = rawPages
+          .map((p) =>
+            p && typeof p === 'object' && 'content' in (p as Record<string, unknown>)
+              ? (p as { content: unknown }).content
+              : p,
+          )
+          .filter((c) => c && typeof c === 'object')
+          .map((content) => ({ content }));
+        if (pages.length < 2) {
+          toast('Backup needs at least 2 pages', 'destructive');
+          return;
+        }
+        const res = await fetch('/api/sketch/journals', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({
+            title,
+            coverStyle: raw.coverStyle ?? undefined,
+            paperColor: typeof raw.paperColor === 'string' ? raw.paperColor : undefined,
+            pages,
+          }),
+        });
+        if (!res.ok) {
+          const err = (await res.json().catch(() => null)) as { error?: string } | null;
+          toast(err?.error ?? 'Could not import backup', 'destructive');
+          return;
+        }
+        const data = (await res.json()) as { journal: JournalDTO };
+        await refreshJournals();
+        setSelectedId(data.journal.id);
+        engineRef.current?.selectJournal(data.journal.id);
+        toast(`“${data.journal.title}” imported`, 'success');
+      } catch {
+        toast('Invalid backup file', 'destructive');
+      } finally {
+        setImporting(false);
+        if (importFileRef.current) importFileRef.current.value = '';
+      }
+    },
+    [refreshJournals, toast],
+  );
+
   const exportJournalJson = useCallback(() => {
     if (!detail) return;
     const blob = new Blob([JSON.stringify(detail, null, 2)], { type: 'application/json' });
@@ -491,17 +612,63 @@ export default function SketchApp() {
     toast('Journal exported', 'success');
   }, [detail, toast]);
 
+  /** Export a rendered PNG: use the native share sheet when available
+   *  (mobile), otherwise download the file. */
+  const exportImagePng = useCallback(
+    async (dataUrl: string, filename: string, successMsg: string) => {
+      try {
+        const blob = await (await fetch(dataUrl)).blob();
+        const file = new File([blob], filename, { type: 'image/png' });
+        const nav = navigator as Navigator & {
+          canShare?: (d: { files?: File[] }) => boolean;
+          share?: (d: { files?: File[]; title?: string }) => Promise<void>;
+        };
+        if (nav.canShare?.({ files: [file] }) && nav.share) {
+          await nav.share({ files: [file], title: 'Shibu Sketch' });
+          toast('Shared', 'success');
+          return;
+        }
+      } catch (err) {
+        // user cancelled the share sheet — do not fall through to a download
+        if ((err as DOMException)?.name === 'AbortError') return;
+        /* otherwise fall through to the plain download */
+      }
+      const a = document.createElement('a');
+      a.href = dataUrl;
+      a.download = filename;
+      a.click();
+      toast(successMsg, 'success');
+    },
+    [toast],
+  );
+
   const exportPagePng = useCallback(() => {
     if (!detail) return;
     const pageIndex = Math.min(spread * 2 + 1, detail.pages.length - 1);
     const content = detail.pages[pageIndex]?.content ?? parsePageContent('{}');
     const url = contentToDataURL(content, 620, 868, detail.paperColor);
-    const a = document.createElement('a');
-    a.href = url;
-    a.download = `page-${pageIndex + 1}.png`;
-    a.click();
-    toast('Page exported as PNG', 'success');
-  }, [detail, spread, toast]);
+    if (!url) {
+      toast('Could not render page', 'destructive');
+      return;
+    }
+    void exportImagePng(url, `page-${pageIndex + 1}.png`, 'Page exported as PNG');
+  }, [detail, spread, exportImagePng, toast]);
+
+  /** PNG of the open two-page spread (left + right with a gutter shadow). */
+  const exportSpreadPng = useCallback(() => {
+    if (!detail) return;
+    const leftIdx = spread * 2;
+    const rightIdx = spread * 2 + 1;
+    const left = detail.pages[leftIdx]?.content ?? null;
+    const right = detail.pages[rightIdx]?.content ?? null;
+    if (!left && !right) return;
+    const url = spreadToDataURL(left, right, 620, 868, detail.paperColor);
+    if (!url) {
+      toast('Could not render spread', 'destructive');
+      return;
+    }
+    void exportImagePng(url, `spread-${spread + 1}.png`, 'Spread exported as PNG');
+  }, [detail, spread, exportImagePng, toast]);
 
   const copyLink = useCallback(() => {
     void navigator.clipboard?.writeText(window.location.href);
@@ -527,12 +694,23 @@ export default function SketchApp() {
     [view],
   );
 
-  /* keyboard shortcuts */
+  /* keyboard shortcuts — inactive while any dialog/overlay is on top */
   useEffect(() => {
     const onKey = (e: KeyboardEvent) => {
       const tag = (e.target as HTMLElement | null)?.tagName;
       if (tag === 'INPUT' || tag === 'TEXTAREA') return;
       if (editTarget) return;
+      if (
+        menuOpen ||
+        shareOpen ||
+        gridOpen ||
+        searchOpen ||
+        newOpen ||
+        aboutOpen ||
+        renaming
+      ) {
+        return;
+      }
       if (view === 'open') {
         if (e.key === 'ArrowRight') engineRef.current?.flipPage(1);
         if (e.key === 'ArrowLeft') engineRef.current?.flipPage(-1);
@@ -541,7 +719,14 @@ export default function SketchApp() {
     };
     window.addEventListener('keydown', onKey);
     return () => window.removeEventListener('keydown', onKey);
-  }, [view, editTarget, closeJournal]);
+  }, [view, editTarget, closeJournal, menuOpen, shareOpen, gridOpen, searchOpen, newOpen, aboutOpen, renaming]);
+
+  /* hint chip gently fades away after a few seconds of reading */
+  useEffect(() => {
+    if (view !== 'open' || hintSeen) return;
+    const t = window.setTimeout(() => setHintSeen(true), 7000);
+    return () => window.clearTimeout(t);
+  }, [view, hintSeen]);
 
   /* ------------------------------------------------------------ */
   /* render                                                        */
@@ -567,6 +752,16 @@ export default function SketchApp() {
           opacity: dark ? 1 : 0,
           background:
             'radial-gradient(120% 90% at 50% 42%, #3c4358 0%, #343b4d 45%, #262c3b 100%)',
+        }}
+      />
+      {/* warm reading-lamp glow, top center (dark view only) */}
+      <div
+        aria-hidden
+        className="pointer-events-none absolute inset-0 transition-opacity duration-[1200ms] ease-in-out"
+        style={{
+          opacity: dark ? 1 : 0,
+          background:
+            'radial-gradient(44% 26% at 50% -2%, rgba(255,232,196,0.13) 0%, rgba(255,232,196,0.05) 45%, rgba(255,232,196,0) 100%)',
         }}
       />
       {/* film grain */}
@@ -750,6 +945,8 @@ export default function SketchApp() {
           setRenameValue(detail?.title ?? selected?.title ?? '');
           setRenaming(true);
         }}
+        onDuplicate={view === 'shelf' && selected ? () => void duplicateSelected() : undefined}
+        onImport={view === 'shelf' ? () => importFileRef.current?.click() : undefined}
         onDelete={() => {
           setMenuOpen(false);
           void deleteSelected();
@@ -757,6 +954,7 @@ export default function SketchApp() {
         onExportPng={view === 'open' ? exportPagePng : undefined}
         onAddPage={view === 'open' && detail ? () => void addPageAfterCurrent() : undefined}
         onDeletePage={view === 'open' && detail ? () => void deleteCurrentPage() : undefined}
+        onDuplicatePage={view === 'open' && detail ? () => void duplicateCurrentPage() : undefined}
         onAbout={() => {
           setMenuOpen(false);
           setAboutOpen(true);
@@ -767,8 +965,24 @@ export default function SketchApp() {
         onOpenChange={setShareOpen}
         title={detail?.title ?? selected?.title ?? 'Shibu Sketch'}
         onExportPage={view === 'open' ? exportPagePng : undefined}
+        onExportSpread={view === 'open' ? exportSpreadPng : undefined}
         onExportJournal={detail ? exportJournalJson : exportJournalJson}
         onCopyLink={copyLink}
+      />
+
+      {/* hidden file input for JSON backup import */}
+      <input
+        ref={importFileRef}
+        type="file"
+        accept="application/json,.json"
+        className="hidden"
+        aria-hidden="true"
+        tabIndex={-1}
+        disabled={importing}
+        onChange={(e) => {
+          const f = e.target.files?.[0];
+          if (f) void importJournalFile(f);
+        }}
       />
 
       {/* about */}

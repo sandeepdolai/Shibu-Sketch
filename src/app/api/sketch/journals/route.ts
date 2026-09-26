@@ -23,7 +23,7 @@ export async function GET() {
   }
 }
 
-/** POST /api/sketch/journals — create a journal with 2 empty pages. */
+/** POST /api/sketch/journals — create a journal (2 empty pages, or supplied pages for import). */
 export async function POST(req: NextRequest) {
   try {
     const body = await req.json().catch(() => null);
@@ -43,7 +43,12 @@ export async function POST(req: NextRequest) {
         coverStyle,
         paperColor: paperColor ?? '#faf8f4',
         order: (max._max.order ?? -1) + 1,
-        pages: { create: [{ index: 0 }, { index: 1 }] },
+        pages: {
+          create: (parsed.data.pages ?? [ {}, {} ]).map((p, i) => ({
+            index: i,
+            content: JSON.stringify(p.content ?? {}),
+          })),
+        },
       },
       include: { _count: { select: { pages: true } } },
     });
