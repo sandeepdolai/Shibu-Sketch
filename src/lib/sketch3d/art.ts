@@ -26,6 +26,29 @@ function contrastText(hex: string): string {
   return 0.299 * r + 0.587 * g + 0.114 * b > 150 ? 'rgba(28,30,38,0.92)' : 'rgba(255,255,255,0.95)';
 }
 
+/** Rounded-rect path helper (works without ctx.roundRect support). */
+function roundRectPath(
+  ctx: CanvasRenderingContext2D,
+  x: number,
+  y: number,
+  w: number,
+  h: number,
+  r: number,
+): void {
+  const rr = Math.min(r, w / 2, h / 2);
+  ctx.beginPath();
+  ctx.moveTo(x + rr, y);
+  ctx.lineTo(x + w - rr, y);
+  ctx.arcTo(x + w, y, x + w, y + rr, rr);
+  ctx.lineTo(x + w, y + h - rr);
+  ctx.arcTo(x + w, y + h, x + w - rr, y + h, rr);
+  ctx.lineTo(x + rr, y + h);
+  ctx.arcTo(x, y + h, x, y + h - rr, rr);
+  ctx.lineTo(x, y + rr);
+  ctx.arcTo(x, y, x + rr, y, rr);
+  ctx.closePath();
+}
+
 function grain(ctx: CanvasRenderingContext2D, w: number, h: number, alpha: number, seed: number) {
   const rnd = mulberry32(seed);
   ctx.save();
@@ -228,13 +251,11 @@ export function drawCoverArt(ctx: CanvasRenderingContext2D, style: CoverStyle, w
   // title
   const title = style.title?.trim();
   if (title) {
-    const dark = contrastText(style.color);
     ctx.save();
     ctx.textAlign = 'center';
     ctx.textBaseline = 'middle';
     const fs = title.length > 12 ? w * 0.09 : w * 0.13;
     ctx.font = `700 ${fs}px ui-rounded, system-ui, "Segoe UI", sans-serif`;
-    ctx.fillStyle = style.kind === 'pattern' || style.kind === 'collage' ? dark : contrastText(style.color);
     // wrap up to 3 lines
     const words = title.split(/\s+/);
     const lines: string[] = [];
@@ -248,6 +269,33 @@ export function drawCoverArt(ctx: CanvasRenderingContext2D, style: CoverStyle, w
     }
     if (line) lines.push(line);
     const startY = h * (style.kind === 'collage' ? 0.82 : 0.5) - ((lines.length - 1) * fs * 0.6);
+
+    // knockout plate: on pattern/collage covers the raw artwork runs under the
+    // glyphs; a soft translucent plate of the base color restores contrast
+    // (same idea as the DOM grid cards).
+    const ink = contrastText(style.color);
+    const whiteInk = ink.includes('255,255,255');
+    if (style.kind === 'pattern' || style.kind === 'collage') {
+      const padX = fs * 0.55;
+      const padY = fs * 0.42;
+      let maxW = 0;
+      for (const l of lines) maxW = Math.max(maxW, ctx.measureText(l).width);
+      const plateW = Math.min(w * 0.92, maxW + padX * 2);
+      const plateH = lines.length * fs * 1.15 + padY * 2;
+      const plateY = startY - plateH / 2 + fs * 0.28;
+      ctx.save();
+      ctx.globalAlpha = 0.82;
+      ctx.fillStyle = style.color;
+      roundRectPath(ctx, w / 2 - plateW / 2, plateY, plateW, plateH, fs * 0.3);
+      ctx.fill();
+      ctx.globalAlpha = 0.14;
+      ctx.fillStyle = whiteInk ? '#000000' : '#ffffff';
+      roundRectPath(ctx, w / 2 - plateW / 2, plateY, plateW, plateH, fs * 0.3);
+      ctx.fill();
+      ctx.restore();
+    }
+
+    ctx.fillStyle = ink;
     lines.slice(0, 3).forEach((l, i) => {
       ctx.fillText(l, w / 2, startY + i * fs * 1.15);
     });

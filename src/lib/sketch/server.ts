@@ -91,13 +91,16 @@ const photoItemSchema = z
   })
   .loose();
 
-export const pageContentSchema = z.object({
-  bg: z.string().optional(),
-  strokes: z.array(strokeSchema),
-  texts: z.array(textItemSchema),
-  stickers: z.array(stickerItemSchema),
-  photos: z.array(photoItemSchema),
-});
+export const pageContentSchema = z
+  .object({
+    bg: z.string().optional(),
+    template: z.enum(['plain', 'dotted', 'grid', 'lined']).optional(),
+    strokes: z.array(strokeSchema),
+    texts: z.array(textItemSchema),
+    stickers: z.array(stickerItemSchema),
+    photos: z.array(photoItemSchema),
+  })
+  .loose(); // keep forward-compatible keys (future renderer fields)
 
 export const createJournalSchema = z.object({
   title: z.string().trim().min(1, 'title is required').max(60, 'title too long (max 60)'),

@@ -10,7 +10,14 @@
 
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import dynamic from 'next/dynamic';
-import type { CoverStyle, JournalDTO, JournalDetailDTO, PageContent } from '@/lib/sketch/types';
+import type {
+  CoverStyle,
+  JournalDTO,
+  JournalDetailDTO,
+  PageContent,
+  PageDTO,
+  PageTemplate,
+} from '@/lib/sketch/types';
 import { parsePageContent } from '@/lib/sketch/types';
 import { SketchEngine } from '@/lib/sketch3d/sketchEngine';
 import { contentToDataURL, spreadToDataURL } from '@/lib/sketch/render';
@@ -51,6 +58,8 @@ export default function SketchApp() {
   const [hintSeen, setHintSeen] = useState(false);
 
   const [gridOpen, setGridOpen] = useState(false);
+  /** 3D table-top overview (engine 'grid' mode) — shelf only */
+  const [grid3d, setGrid3d] = useState(false);
   const [searchOpen, setSearchOpen] = useState(false);
   const [newOpen, setNewOpen] = useState(false);
   const [creating, setCreating] = useState(false);
@@ -191,6 +200,7 @@ export default function SketchApp() {
         const startSpread = Math.min(loadProgress(data.journal.id), Math.max(0, Math.ceil(data.journal.pages.length / 2) - 1));
         setDetail(data.journal);
         setSpread(startSpread);
+        setGrid3d(false); // leaving the 3D grid (if it was open)
         setView('opening');
         engineRef.current?.openJournal(data.journal, startSpread);
       } catch {
@@ -231,8 +241,10 @@ export default function SketchApp() {
         const page = cur.pages[pageIndex];
         if (page) setEditTarget({ pageId: page.id, pageIndex, content: page.content });
       },
+      onGridChange: (active) => setGrid3d(active),
     });
     engineRef.current = engine;
+    setGrid3d(false); // a fresh engine always starts on the shelf (HMR-safe)
     // journals may have loaded before the engine existed
     if (journalsRef.current.length > 0) {
       engine.setJournals(journalsRef.current);
@@ -387,8 +399,8 @@ export default function SketchApp() {
     }
   }, [detail, journals, toast]);
 
-  /** Insert a blank page right after the spread being viewed. */
-  const addPageAfterCurrent = useCallback(async () => {
+  /** Insert a (template) page right after the spread being viewed. */
+  const addPageAfterCurrent = useCallback(async (template: PageTemplate = 'plain') => {
     if (!detail) return;
     try {
       const res = await fetch(`/api/sketch/journals/${detail.id}/pages`, {
@@ -397,6 +409,15 @@ export default function SketchApp() {
         body: JSON.stringify({ atIndex: spread * 2 + 2 }),
       });
       if (!res.ok) throw new Error();
+      const created = (await res.json()) as { page: PageDTO };
+      if (template !== 'plain') {
+        const put = await fetch(`/api/sketch/pages/${created.page.id}`, {
+          method: 'PUT',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ content: { template, strokes: [], texts: [], stickers: [], photos: [] } }),
+        });
+        if (!put.ok) throw new Error();
+      }
       const r2 = await fetch(`/api/sketch/journals/${detail.id}`, { cache: 'no-store' });
       const data = (await r2.json()) as { journal: JournalDetailDTO };
       setDetail(data.journal);
@@ -715,11 +736,13 @@ export default function SketchApp() {
         if (e.key === 'ArrowRight') engineRef.current?.flipPage(1);
         if (e.key === 'ArrowLeft') engineRef.current?.flipPage(-1);
         if (e.key === 'Escape') closeJournal();
+      } else if (grid3d) {
+        if (e.key === 'Escape' || e.key === 'g') engineRef.current?.exitGrid();
       }
     };
     window.addEventListener('keydown', onKey);
     return () => window.removeEventListener('keydown', onKey);
-  }, [view, editTarget, closeJournal, menuOpen, shareOpen, gridOpen, searchOpen, newOpen, aboutOpen, renaming]);
+  }, [view, editTarget, closeJournal, menuOpen, shareOpen, gridOpen, searchOpen, newOpen, aboutOpen, renaming, grid3d]);
 
   /* hint chip gently fades away after a few seconds of reading */
   useEffect(() => {
@@ -809,7 +832,14 @@ export default function SketchApp() {
         <ShelfTopBar
           journalCount={journals.length}
           onWordmark={() => setAboutOpen(true)}
-          onGrid={() => setGridOpen(true)}
+          onGrid={() => {
+            if (view !== 'shelf') return;
+            const engine = engineRef.current;
+            if (!engine) return;
+            // the engine is the source of truth for grid state
+            if (engine.isGrid()) engine.exitGrid();
+            else engine.enterGrid();
+          }}
           onSearch={() => setSearchOpen(true)}
           onMenu={() => setAboutOpen(true)}
           soundMuted={soundMuted}
@@ -846,6 +876,13 @@ export default function SketchApp() {
       <div className="pointer-events-none absolute inset-x-0 top-16 z-20 flex flex-col items-center gap-1 md:top-20">
         {view === 'open' && detail ? (
           <TitleBlock title={detail.title} pageCount={detail.pages.length} mode="open" />
+        ) : grid3d && view === 'shelf' ? (
+          <TitleBlock
+            title="All Journals"
+            pageCount={journals.length}
+            mode="shelf"
+            subtitle={`${journals.length} ${journals.length === 1 ? 'Journal' : 'Journals'}`}
+          />
         ) : (
           selected && (
             <TitleBlock
@@ -952,7 +989,9 @@ export default function SketchApp() {
           void deleteSelected();
         }}
         onExportPng={view === 'open' ? exportPagePng : undefined}
-        onAddPage={view === 'open' && detail ? () => void addPageAfterCurrent() : undefined}
+        onAddPage={
+          view === 'open' && detail ? (t) => void addPageAfterCurrent(t) : undefined
+        }
         onDeletePage={view === 'open' && detail ? () => void deleteCurrentPage() : undefined}
         onDuplicatePage={view === 'open' && detail ? () => void duplicateCurrentPage() : undefined}
         onAbout={() => {

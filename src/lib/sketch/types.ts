@@ -83,9 +83,13 @@ export interface PhotoItem {
   captionFont?: TextFont;
 }
 
+export type PageTemplate = 'plain' | 'dotted' | 'grid' | 'lined';
+
 export interface PageContent {
   /** paper tint override (css color); omit = journal paperColor */
   bg?: string;
+  /** page template drawn under the content; omit = 'plain' */
+  template?: PageTemplate;
   strokes: Stroke[];
   texts: TextItem[];
   stickers: StickerItem[];
@@ -176,6 +180,10 @@ export function parsePageContent(raw: string | null | undefined): PageContent {
     if (!v || typeof v !== 'object') return base;
     return {
       bg: typeof v.bg === 'string' ? v.bg : undefined,
+      template:
+        v.template === 'dotted' || v.template === 'grid' || v.template === 'lined'
+          ? v.template
+          : undefined,
       strokes: Array.isArray(v.strokes) ? v.strokes : [],
       texts: Array.isArray(v.texts) ? v.texts : [],
       stickers: Array.isArray(v.stickers) ? v.stickers : [],

@@ -15,6 +15,7 @@
 import type {
   DrawTool,
   PageContent,
+  PageTemplate,
   PhotoItem,
   StickerItem,
   Stroke,
@@ -466,6 +467,96 @@ function drawPaperNoise(ctx: CanvasRenderingContext2D, cssW: number, cssH: numbe
 }
 
 /* ------------------------------------------------------------------ */
+/* Page templates (dotted / grid / lined)                              */
+/* ------------------------------------------------------------------ */
+
+/**
+ * Draws the page template under the content — faint warm-grey dots, squares
+ * or ruled lines, like a Bullet-Journal insert. Template color adapts to the
+ * paper tint (darker on light paper, lighter on dark paper).
+ */
+export function drawPageTemplate(
+  ctx: CanvasRenderingContext2D,
+  template: PageTemplate,
+  cssW: number,
+  cssH: number,
+  paper: string,
+): void {
+  if (template === 'plain') return;
+  // ink color: warm grey on light paper; pale grey on dark paper
+  const dark = isDarkColor(paper);
+  const ink = dark ? 'rgba(255,255,255,0.16)' : 'rgba(120,110,90,0.28)';
+  const inkStrong = dark ? 'rgba(255,255,255,0.26)' : 'rgba(120,110,90,0.4)';
+
+  ctx.save();
+  ctx.fillStyle = ink;
+  ctx.strokeStyle = ink;
+  const margin = Math.min(cssW, cssH) * 0.055;
+
+  if (template === 'dotted') {
+    const step = cssW * 0.062;
+    const r = Math.max(1, cssW * 0.0055);
+    for (let y = margin; y <= cssH - margin; y += step) {
+      for (let x = margin; x <= cssW - margin; x += step) {
+        ctx.beginPath();
+        ctx.arc(x, y, r, 0, Math.PI * 2);
+        ctx.fill();
+      }
+    }
+  } else if (template === 'grid') {
+    const step = cssW * 0.082;
+    ctx.lineWidth = Math.max(0.75, cssW * 0.0018);
+    ctx.beginPath();
+    for (let x = margin; x <= cssW - margin + 0.5; x += step) {
+      ctx.moveTo(x, margin);
+      ctx.lineTo(x, cssH - margin);
+    }
+    for (let y = margin; y <= cssH - margin + 0.5; y += step) {
+      ctx.moveTo(margin, y);
+      ctx.lineTo(cssW - margin, y);
+    }
+    ctx.stroke();
+    // faint margin rule (notebook feel)
+    ctx.strokeStyle = inkStrong;
+    ctx.lineWidth = Math.max(1, cssW * 0.003);
+    ctx.beginPath();
+    ctx.moveTo(margin * 0.72, 0);
+    ctx.lineTo(margin * 0.72, cssH);
+    ctx.stroke();
+  } else if (template === 'lined') {
+    const step = cssH * 0.075;
+    ctx.lineWidth = Math.max(0.9, cssW * 0.0022);
+    ctx.beginPath();
+    for (let y = margin * 1.4; y <= cssH - margin; y += step) {
+      ctx.moveTo(margin * 0.6, y);
+      ctx.lineTo(cssW - margin * 0.6, y);
+    }
+    ctx.stroke();
+    // red-ish margin rule like a classic notebook
+    ctx.strokeStyle = dark ? 'rgba(255,150,150,0.35)' : 'rgba(220,120,120,0.4)';
+    ctx.lineWidth = Math.max(1, cssW * 0.003);
+    ctx.beginPath();
+    ctx.moveTo(margin * 0.72, 0);
+    ctx.lineTo(margin * 0.72, cssH);
+    ctx.stroke();
+  }
+  ctx.restore();
+}
+
+/** Perceived-luminance check (0..1) for adapting template ink. */
+function isDarkColor(css: string): boolean {
+  const m = css.trim().match(/^#([0-9a-f]{6})$/i);
+  if (m) {
+    const n = parseInt(m[1], 16);
+    const r = (n >> 16) & 255;
+    const g = (n >> 8) & 255;
+    const b = n & 255;
+    return (0.2126 * r + 0.7152 * g + 0.0722 * b) / 255 < 0.5;
+  }
+  return false;
+}
+
+/* ------------------------------------------------------------------ */
 /* Shapes (path builders, all sized to a square of `size` px)          */
 /* ------------------------------------------------------------------ */
 
@@ -897,6 +988,7 @@ export function renderPageContent(
   ctx.fillStyle = paper;
   ctx.fillRect(0, 0, cssW, cssH);
   drawPaperNoise(ctx, cssW, cssH);
+  drawPageTemplate(ctx, content.template ?? 'plain', cssW, cssH, paper);
   for (const p of content.photos ?? []) renderPhoto(ctx, p, cssW, cssH);
   for (const s of content.stickers ?? []) renderSticker(ctx, s, cssW, cssH);
   renderStrokes(ctx, content.strokes ?? [], cssW, cssH);

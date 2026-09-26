@@ -142,6 +142,62 @@ interface TextEditState {
   preSnapshot: PageContent;
 }
 
+/** Max stored photo edge (px) — keeps dataUrls small enough for SQLite + 3D textures. */
+const PHOTO_MAX_EDGE = 1024;
+
+/**
+ * Downscale a photo dataUrl so the long edge is ≤ PHOTO_MAX_EDGE and re-encode
+ * as JPEG (keeps PNG for transparency-carrying images ≤ max edge untouched).
+ * Returns the (possibly untouched) dataUrl and the aspect (h/w).
+ */
+async function downscalePhoto(
+  dataUrl: string,
+): Promise<{ dataUrl: string; aspect: number }> {
+  const aspect = await new Promise<number>((resolve) => {
+    const img = new Image();
+    img.onload = () =>
+      resolve(
+        img.naturalHeight > 0 && img.naturalWidth > 0
+          ? img.naturalHeight / img.naturalWidth
+          : 1,
+      );
+    img.onerror = () => resolve(1);
+    img.src = dataUrl;
+  });
+  const scaled = await new Promise<{ dataUrl: string; aspect: number }>((resolve) => {
+    const img = new Image();
+    img.onload = () => {
+      const { naturalWidth: w, naturalHeight: h } = img;
+      const long = Math.max(w, h);
+      if (long <= PHOTO_MAX_EDGE) {
+        resolve({ dataUrl, aspect });
+        return;
+      }
+      const k = PHOTO_MAX_EDGE / long;
+      const cw = Math.max(1, Math.round(w * k));
+      const ch = Math.max(1, Math.round(h * k));
+      const canvas = document.createElement('canvas');
+      canvas.width = cw;
+      canvas.height = ch;
+      const ctx = canvas.getContext('2d');
+      if (!ctx) {
+        resolve({ dataUrl, aspect });
+        return;
+      }
+      ctx.imageSmoothingQuality = 'high';
+      ctx.drawImage(img, 0, 0, cw, ch);
+      try {
+        resolve({ dataUrl: canvas.toDataURL('image/jpeg', 0.82), aspect: ch / cw });
+      } catch {
+        resolve({ dataUrl, aspect });
+      }
+    };
+    img.onerror = () => resolve({ dataUrl, aspect });
+    img.src = dataUrl;
+  });
+  return scaled;
+}
+
 /* ------------------------------------------------------------------ */
 /* Component                                                           */
 /* ------------------------------------------------------------------ */
@@ -155,6 +211,7 @@ export function DrawingOverlay({
 }: DrawingOverlayProps) {
   const [content, setContent] = useState<PageContent>(() => ({
     bg: initialContent.bg,
+    template: initialContent.template,
     strokes: initialContent.strokes ?? [],
     texts: initialContent.texts ?? [],
     stickers: initialContent.stickers ?? [],
@@ -477,18 +534,15 @@ export function DrawingOverlay({
   const handlePhotoFile = useCallback(
     async (file: File) => {
       try {
-        const dataUrl = await new Promise<string>((resolve, reject) => {
+        const rawUrl = await new Promise<string>((resolve, reject) => {
           const reader = new FileReader();
           reader.onload = () => resolve(String(reader.result));
           reader.onerror = () => reject(reader.error);
           reader.readAsDataURL(file);
         });
-        const aspect = await new Promise<number>((resolve) => {
-          const img = new Image();
-          img.onload = () => resolve(img.naturalHeight > 0 && img.naturalWidth > 0 ? img.naturalHeight / img.naturalWidth : 1);
-          img.onerror = () => resolve(1);
-          img.src = dataUrl;
-        });
+        // Downscale big photos (phone cameras produce multi-MB images that
+        // bloat the DB and the 3D page textures) before storing.
+        const { dataUrl, aspect } = await downscalePhoto(rawUrl);
         await preloadImages({ ...content, photos: [{ id: 'tmp', kind: 'url', dataUrl, x: 0, y: 0, w: 1, rotation: 0, aspect }] });
         const item: PhotoItem = {
           id: uid(),

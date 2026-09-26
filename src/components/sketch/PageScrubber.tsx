@@ -59,7 +59,11 @@ export function PageScrubber({
     if (!visible) return;
     e.preventDefault();
     e.currentTarget.focus();
-    e.currentTarget.setPointerCapture(e.pointerId);
+    try {
+      e.currentTarget.setPointerCapture(e.pointerId);
+    } catch {
+      /* synthetic/stale pointers may throw NotFoundError — safe to ignore */
+    }
     setDragging(true);
     onChange(valueFromEvent(e));
   };

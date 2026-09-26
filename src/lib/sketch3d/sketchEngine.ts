@@ -53,6 +53,8 @@ export interface SketchEngineCallbacks {
   onSpreadChange(spread: number): void;
   /** double-click / center tap on a page in open view -> edit request */
   onEditPage(pageIndex: number): void;
+  /** shelf <-> 3D grid overview mode toggled */
+  onGridChange?(active: boolean): void;
 }
 
 interface ShelfEntry {
@@ -63,7 +65,7 @@ interface ShelfEntry {
   blob: THREE.Mesh;
 }
 
-type Mode = 'shelf' | 'opening' | 'open' | 'closing';
+type Mode = 'shelf' | 'grid' | 'opening' | 'open' | 'closing';
 
 interface FlipState {
   active: boolean;
@@ -105,6 +107,9 @@ export class SketchEngine {
   private flip: FlipState = { active: false, dir: 1, from: 0, start: 0 };
   private spreadTween: SpreadTween = { active: false, from: 0, to: 0, start: 0 };
   private static readonly TWEEN_DUR = 0.34;
+  /** pose captured at openJournal: stand rotation + root height we transition from */
+  private openStartStand = HALF_PI;
+  private openStartRootY = 0;
 
   /* shelf scroll */
   private scroll = 0; // float index
@@ -112,8 +117,13 @@ export class SketchEngine {
   private dragging = false;
   private dragStartX = 0;
   private dragLastX = 0;
+  private dragLastY = 0;
   private dragMoved = 0;
   private dragVelocity = 0;
+
+  /* grid (table-top overview) scroll */
+  private gridScroll = 0;
+  private gridScrollTarget = 0;
 
   /* tilt parallax */
   private tiltX = 0;
@@ -248,16 +258,24 @@ export class SketchEngine {
     return this.selectedId;
   }
 
-  /** Begin the open transition for a journal (must already be selected). */
+  /** Begin the open transition for a journal (must already be selected).
+   *  Works from the standing shelf AND from the 3D grid overview. */
   openJournal(detail: JournalDetailDTO, startSpread: number): void {
-    if (this.mode !== 'shelf') return;
+    if (this.mode !== 'shelf' && this.mode !== 'grid') return;
     const entry = this.journals.get(detail.id);
     if (!entry) return;
+    if (this.mode === 'grid') {
+      // leaving the grid overview — keep React in sync
+      this.cb.onGridChange?.(false);
+    }
     this.openEntry = entry;
     this.pageCount = detail.pages.length;
     this.pagesData = detail.pages.map((p) => ({ id: p.id, content: p.content }));
     this.paperColor = detail.paperColor || '#faf8f4';
     this.spread = Math.max(0, Math.min(startSpread, this.spreadCount() - 1));
+    // capture the pose we transition FROM (shelf lift or flat grid slot)
+    this.openStartStand = entry.obj.stand.rotation.x;
+    this.openStartRootY = entry.obj.root.position.y;
     // capture neighbor start poses BEFORE the slide-away so the open
     // transition converges even when the shelf is mid-scroll (search pick)
     this.slideStart.clear();
@@ -322,10 +340,12 @@ export class SketchEngine {
 
   /** Immediately return to shelf mode (e.g. the open journal was deleted). */
   forceShelf(): void {
+    const wasGrid = this.mode === 'grid';
     this.mode = 'shelf';
     this.openEntry = null;
     this.flip.active = false;
     this.spreadTween.active = false;
+    this.gridScroll = this.gridScrollTarget = 0;
     this.camFov = 33;
     this.updateCameraFit();
     this.camPos.set(0, 1.06, 5.2);
@@ -338,11 +358,104 @@ export class SketchEngine {
       j.blob.visible = true;
       (j.blob.material as THREE.MeshBasicMaterial).opacity = 0.38;
     }
+    if (wasGrid) this.cb.onGridChange?.(false);
   }
 
   /** After a close/forceShelf, hide the open book's leftover pose. */
   markClosedSpread(spread: number): void {
     this.spread = Math.max(0, spread);
+  }
+
+  /* ================================================================ */
+  /* 3D grid (table-top overview)                                     */
+  /* ================================================================ */
+
+  /** Enter the table-top overview: books lay flat in a grid, camera above. */
+  enterGrid(): void {
+    if (this.mode !== 'shelf') return;
+    this.mode = 'grid';
+    this.gridScroll = this.gridScrollTarget = 0;
+    this.cb.onGridChange?.(true);
+    playTap();
+  }
+
+  /** Leave the overview back to the standing shelf. */
+  exitGrid(): void {
+    if (this.mode !== 'grid') return;
+    this.mode = 'shelf';
+    this.cb.onGridChange?.(false);
+    playTap();
+  }
+
+  isGrid(): boolean {
+    return this.mode === 'grid';
+  }
+
+  private gridCols(): number {
+    return (this.camera.aspect || 1) >= 0.9 ? 4 : 2;
+  }
+
+  private gridRows(): number {
+    return Math.max(1, Math.ceil(this.order.length / this.gridCols()));
+  }
+
+  /** Camera pose looking down at the flat grid (fits rows/cols, any aspect). */
+  private gridCamTarget(): { pos: THREE.Vector3; look: THREE.Vector3; fov: number } {
+    const aspect = this.camera.aspect || 1;
+    const fov = aspect < 0.9 ? 48 : 42;
+    const tanF = Math.tan((fov * Math.PI) / 360);
+    const cols = this.gridCols();
+    const rows = this.gridRows();
+    const spanW = cols * JOURNAL_W * 1.24 + 0.3;
+    const spanZ = rows * JOURNAL_H * 1.12 + 0.6;
+    // the tilted view foreshortens the depth axis (~cos 60°)
+    const needW = spanW * 1.05;
+    const needV = spanZ * 0.8;
+    const dist = Math.max((needW / (2 * tanF * aspect)), needV / (2 * tanF), 3.4);
+    const dir = new THREE.Vector3(0, 0.86, 0.44).normalize();
+    const center = new THREE.Vector3(0, 0, 0.08);
+    return {
+      pos: center.clone().add(dir.multiplyScalar(dist)),
+      look: center,
+      fov,
+    };
+  }
+
+  /** Per-frame eased pose of every journal in the grid. */
+  private updateGrid(now: number): void {
+    // vertical drag pan between rows
+    this.gridScroll = lerp(this.gridScroll, this.gridScrollTarget, 0.14);
+    const cam = this.gridCamTarget();
+    this.camPos.lerp(cam.pos, 0.11);
+    this.camLook.lerp(cam.look, 0.11);
+    this.camFov = lerp(this.camFov, cam.fov, 0.1);
+
+    const cols = this.gridCols();
+    const gapX = JOURNAL_W * 1.26;
+    const gapZ = JOURNAL_H * 1.12;
+    this.order.forEach((id, i) => {
+      const entry = this.journals.get(id);
+      if (!entry) return;
+      const col = i % cols;
+      const row = Math.floor(i / cols);
+      const x = (col - (cols - 1) / 2) * gapX;
+      const z = (row - (this.gridRows() - 1) / 2) * gapZ + this.gridScroll * gapZ;
+      const root = entry.obj.root;
+      root.position.x = lerp(root.position.x, x, 0.14);
+      root.position.y = lerp(root.position.y, id === this.selectedId ? 0.085 : 0.012, 0.14);
+      root.position.z = lerp(root.position.z, z, 0.14);
+      root.rotation.y = lerp(root.rotation.y, 0, 0.14);
+      root.rotation.z = lerp(root.rotation.z, 0, 0.14);
+      entry.obj.stand.rotation.x = lerp(entry.obj.stand.rotation.x, 0, 0.14);
+      this.setSpineFlat(entry.obj, 1);
+      entry.blob.visible = true;
+      entry.blob.position.set(root.position.x, 0.004, root.position.z + 0.06);
+      const bm = entry.blob.material as THREE.MeshBasicMaterial;
+      bm.opacity = lerp(bm.opacity, id === this.selectedId ? 0.55 : 0.3, 0.14);
+      // subtle idle breathing so the grid feels alive
+      root.rotation.z = Math.sin(now * 0.6 + i * 1.7) * 0.004;
+    });
+    this.dragVelocity *= 0.9;
   }
 
   /** Current spread index (open mode). */
@@ -853,9 +966,9 @@ export class SketchEngine {
       { const bm = j.blob.material as THREE.MeshBasicMaterial; bm.opacity = Math.max(0, (st ? st.blob : 0.38) - (st ? st.blob : 0.38) * away); }
     }
 
-    // phase A lift (0..0.18): root rises a bit more
+    // phase A lift (0..0.18): root rises toward the shelf-lift pose
     const liftT = easeOut(clamp01(t / 0.18));
-    const baseY = SHELF_BASE_Y + SELECT_LIFT;
+    const baseY = this.openStartRootY || SHELF_BASE_Y + SELECT_LIFT;
     // phase B blossom (0.1..0.62): cover swings around vertical spine while standing
     const blossom = easeInOut(clamp01((t - 0.08) / 0.54));
     // phase C lay flat (0.5..1)
@@ -868,9 +981,10 @@ export class SketchEngine {
     // re-center: closed book centers on its cover; open spread centers on the spine
     obj.offset.position.x = lerp(-JOURNAL_W / 2, 0, easeInOut(clamp01((t - 0.35) / 0.5)));
 
-    obj.stand.rotation.x = lerp(HALF_PI, 0, layT);
-    // slight backward tilt while standing during blossom
-    obj.stand.rotation.x += Math.sin(blossom * Math.PI) * 0.12 * (1 - layT);
+    obj.stand.rotation.x = lerp(this.openStartStand, 0, layT);
+    // slight backward tilt while standing during blossom (shelf start only —
+    // from the flat grid the book is already lying down)
+    obj.stand.rotation.x += Math.sin(blossom * Math.PI) * 0.12 * (1 - layT) * (this.openStartStand > 0.5 ? 1 : 0.3);
 
     // cover: closed -> open
     const closedY = obj.coverPivot.userData.closedY as number;
@@ -1041,11 +1155,22 @@ export class SketchEngine {
         const isSelected = id === this.selectedId;
         const targetY = SHELF_BASE_Y + (isSelected ? SELECT_LIFT : 0);
         root.position.y = lerp(root.position.y, targetY, 0.14);
+        // recover from any lingering grid pose (flat book → stand back up)
+        entry.obj.stand.rotation.x = lerp(entry.obj.stand.rotation.x, HALF_PI, 0.14);
+        entry.obj.root.rotation.z = lerp(entry.obj.root.rotation.z, 0, 0.14);
+        entry.obj.offset.position.x = lerp(entry.obj.offset.position.x, -JOURNAL_W / 2, 0.14);
+        const sp = entry.obj.spine;
+        if (sp.userData.baseY != null) {
+          sp.scale.y = lerp(sp.scale.y, 1, 0.14);
+          sp.position.y = lerp(sp.position.y, sp.userData.baseY as number, 0.14);
+        }
         entry.blob.position.set(root.position.x, 0.004, root.position.z + 0.05);
         const blobMat = entry.blob.material as THREE.MeshBasicMaterial;
         blobMat.opacity = lerp(blobMat.opacity, isSelected ? 0.55 : 0.34, 0.14);
       });
       this.dragVelocity *= 0.9;
+    } else if (this.mode === 'grid') {
+      this.updateGrid(now);
     } else if (this.mode === 'opening') {
       this.updateOpening(now);
     } else if (this.mode === 'open') {
@@ -1126,6 +1251,7 @@ export class SketchEngine {
     this.dragging = true;
     this.dragStartX = e.clientX;
     this.dragLastX = e.clientX;
+    this.dragLastY = e.clientY;
     this.dragMoved = 0;
     this.pointerDownInfo = {
       x: e.clientX,
@@ -1133,7 +1259,11 @@ export class SketchEngine {
       t: performance.now(),
       id: this.selectedId ?? '',
     };
-    (e.target as Element).setPointerCapture?.(e.pointerId);
+    try {
+      (e.target as Element).setPointerCapture?.(e.pointerId);
+    } catch {
+      // synthetic pointers / stale pointer ids can throw NotFoundError — safe to ignore
+    }
   };
 
   private onPointerMove = (e: PointerEvent): void => {
@@ -1146,12 +1276,19 @@ export class SketchEngine {
 
     if (!this.dragging) return;
     const dx = e.clientX - this.dragLastX;
+    const dy = e.clientY - this.dragLastY;
     this.dragLastX = e.clientX;
-    this.dragMoved += Math.abs(dx);
+    this.dragLastY = e.clientY;
+    this.dragMoved += Math.abs(dx) + Math.abs(dy);
     if (this.mode === 'shelf') {
       this.scrollTarget = this.scrollTarget - dx * 0.011;
       this.scrollTarget = Math.max(-0.35, Math.min(this.order.length - 1 + 0.35, this.scrollTarget));
       this.dragVelocity = lerp(this.dragVelocity, -dx * 0.02, 0.4);
+    } else if (this.mode === 'grid') {
+      // vertical pan between rows (drag up → reveal later rows)
+      this.gridScrollTarget += dy * 0.006;
+      const maxScroll = Math.max(0, this.gridRows() - 1);
+      this.gridScrollTarget = Math.max(0, Math.min(maxScroll, this.gridScrollTarget));
     }
   };
 
@@ -1170,25 +1307,27 @@ export class SketchEngine {
         this.cb.onJournalSelect(newSel);
         playTap();
       }
-      if (!wasDrag && info) {
-        const hit = this.pickJournal(e);
-        if (hit) {
-          if (hit === this.selectedId) {
-            const now = performance.now();
-            if (this.lastTapTarget === hit && now - this.lastTapTime < 600) {
-              // double tap selected -> open immediately
-              this.cb.onJournalTap(hit);
-            } else {
-              this.cb.onJournalTap(hit);
-            }
-            this.lastTapTime = now;
-            this.lastTapTarget = hit;
+    }
+    if ((this.mode === 'shelf' || this.mode === 'grid') && !wasDrag && info) {
+      const hit = this.pickJournal(e);
+      if (hit) {
+        if (hit === this.selectedId) {
+          const now = performance.now();
+          if (this.lastTapTarget === hit && now - this.lastTapTime < 600) {
+            // double tap selected -> open immediately
+            this.cb.onJournalTap(hit);
           } else {
-            this.selectedId = hit;
-            this.scrollTarget = this.order.indexOf(hit);
-            this.cb.onJournalSelect(hit);
-            playTap();
+            this.cb.onJournalTap(hit);
           }
+          this.lastTapTime = now;
+          this.lastTapTarget = hit;
+        } else {
+          this.selectedId = hit;
+          if (this.mode === 'shelf') {
+            this.scrollTarget = this.order.indexOf(hit);
+          }
+          this.cb.onJournalSelect(hit);
+          playTap();
         }
       }
       return;
