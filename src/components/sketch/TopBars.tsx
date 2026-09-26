@@ -10,7 +10,7 @@
 
 import type { ReactNode } from 'react';
 
-import { BookOpen, LayoutGrid, Menu, Search } from 'lucide-react';
+import { BookOpen, LayoutGrid, Menu, Search, Volume2, VolumeX } from 'lucide-react';
 
 import { GhostIconButton, PaperWordmark } from './chrome';
 
@@ -38,6 +38,9 @@ function TopBarShell({
 export interface ShelfTopBarProps {
   /** Number of journals — rendered inside the count pill. */
   journalCount: number;
+  /** Muted state for generated UI sounds. */
+  soundMuted?: boolean;
+  onToggleSound?: () => void;
   onWordmark: () => void;
   /** Count pill click → grid view. */
   onGrid: () => void;
@@ -52,6 +55,8 @@ export function ShelfTopBar({
   onGrid,
   onSearch,
   onMenu,
+  soundMuted,
+  onToggleSound,
 }: ShelfTopBarProps) {
   return (
     <TopBarShell
@@ -71,6 +76,13 @@ export function ShelfTopBar({
           >
             {journalCount}
           </button>
+          {onToggleSound && (
+            <GhostIconButton
+              icon={soundMuted ? <VolumeX className={ICON} /> : <Volume2 className={ICON} />}
+              label={soundMuted ? 'Unmute sounds' : 'Mute sounds'}
+              onClick={onToggleSound}
+            />
+          )}
           <GhostIconButton icon={<Search className={ICON} />} label="Search journals" onClick={onSearch} />
           <GhostIconButton icon={<Menu className={ICON} />} label="Menu" onClick={onMenu} />
         </>
@@ -89,10 +101,13 @@ export interface OpenTopBarProps {
   onGrid: () => void;
   onSearch: () => void;
   onMenu: () => void;
+  /** Muted state for generated UI sounds. */
+  soundMuted?: boolean;
+  onToggleSound?: () => void;
 }
 
-/** Top bar while a journal is open: back + grid left · search + menu right. */
-export function OpenTopBar({ onBack, onGrid, onSearch, onMenu }: OpenTopBarProps) {
+/** Top bar while a journal is open: back + grid left · sound + search + menu right. */
+export function OpenTopBar({ onBack, onGrid, onSearch, onMenu, soundMuted, onToggleSound }: OpenTopBarProps) {
   return (
     <TopBarShell
       left={
@@ -103,6 +118,13 @@ export function OpenTopBar({ onBack, onGrid, onSearch, onMenu }: OpenTopBarProps
       }
       right={
         <>
+          {onToggleSound && (
+            <GhostIconButton
+              icon={soundMuted ? <VolumeX className={ICON} /> : <Volume2 className={ICON} />}
+              label={soundMuted ? 'Unmute sounds' : 'Mute sounds'}
+              onClick={onToggleSound}
+            />
+          )}
           <GhostIconButton icon={<Search className={ICON} />} label="Search" onClick={onSearch} />
           <GhostIconButton icon={<Menu className={ICON} />} label="Journal menu" onClick={onMenu} />
         </>

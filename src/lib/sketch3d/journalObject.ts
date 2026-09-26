@@ -13,7 +13,7 @@
 import * as THREE from 'three';
 import { RoundedBoxGeometry } from 'three/examples/jsm/geometries/RoundedBoxGeometry.js';
 import { createSheetSurface, createSheetSlab } from './sheetGeom';
-import { getForeEdgeTexture, getPaperTexture } from './art';
+import { getForeEdgeTexture, getPaperTexture, getShadowBlobTexture } from './art';
 
 const HALF_PI = Math.PI / 2;
 
@@ -58,6 +58,9 @@ export interface JournalObject {
   coverArtMesh: THREE.Mesh;
   leftWell: THREE.Mesh;
   rightWell: THREE.Mesh;
+  tapZoneL: THREE.Mesh;
+  tapZoneR: THREE.Mesh;
+  flipShadow: THREE.Mesh;
   dispose(): void;
 }
 
@@ -209,6 +212,36 @@ export function buildJournal(opts: BuildJournalOpts): JournalObject {
   flipBack.position.y = -0.0004;
   flipGroup.add(flipEdge, flipFront, flipBack);
 
+  /* -------- invisible tap zones (generous flip hit area) -------- */
+  const zoneGeo = track(new THREE.PlaneGeometry(W * 1.6, H * 1.55)); // generous hit area extends past the fore-edge
+  const zoneMat = track(
+    new THREE.MeshBasicMaterial({ transparent: true, opacity: 0, depthWrite: false }),
+  );
+  const tapZoneR = new THREE.Mesh(zoneGeo, zoneMat);
+  tapZoneR.rotation.x = -HALF_PI; // lie flat like a page
+  tapZoneR.position.set(W / 2, 0.14, 0);
+  const tapZoneL = new THREE.Mesh(zoneGeo, zoneMat);
+  tapZoneL.rotation.x = -HALF_PI;
+  tapZoneL.position.set(-W / 2, 0.14, 0);
+  offset.add(tapZoneR, tapZoneL);
+
+  /* -------- moving shadow under the flipping page -------- */
+  const flipShadow = new THREE.Mesh(
+    track(new THREE.PlaneGeometry(W * 1.15, H * 0.95)),
+    track(
+      new THREE.MeshBasicMaterial({
+        map: getShadowBlobTexture(),
+        transparent: true,
+        depthWrite: false,
+        opacity: 0,
+      }),
+    ),
+  );
+  flipShadow.rotation.x = -HALF_PI;
+  flipShadow.renderOrder = 30;
+  flipShadow.visible = false;
+  offset.add(flipShadow);
+
   const api: JournalObject = {
     root,
     stand,
@@ -225,6 +258,9 @@ export function buildJournal(opts: BuildJournalOpts): JournalObject {
     coverArtMesh,
     leftWell,
     rightWell,
+    tapZoneL,
+    tapZoneR,
+    flipShadow,
     dispose() {
       for (const d of disposables) d.dispose();
     },

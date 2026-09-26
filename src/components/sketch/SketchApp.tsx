@@ -14,7 +14,8 @@ import type { CoverStyle, JournalDTO, JournalDetailDTO, PageContent } from '@/li
 import { parsePageContent } from '@/lib/sketch/types';
 import { SketchEngine } from '@/lib/sketch3d/sketchEngine';
 import { contentToDataURL } from '@/lib/sketch/render';
-import { playTap } from '@/lib/sketch3d/sfx';
+import { isSfxMuted, playTap, setSfxMuted } from '@/lib/sketch3d/sfx';
+import { SlidersHorizontal } from 'lucide-react';
 import { useSketchToast } from './Toasts';
 import { TitleBlock, PageDots } from './chrome';
 import { ShelfTopBar, OpenTopBar } from './TopBars';
@@ -61,6 +62,48 @@ export default function SketchApp() {
   const [copied, setCopied] = useState(false);
 
   const { toast } = useSketchToast();
+
+  /* sound preference (persisted) */
+  const [soundMuted, setSoundMuted] = useState(false);
+  useEffect(() => {
+    try {
+      const stored = window.localStorage.getItem('shibu:muted') === '1';
+      setSoundMuted(stored);
+      setSfxMuted(stored);
+    } catch {
+      /* ignore */
+    }
+  }, []);
+  const toggleSound = useCallback(() => {
+    setSoundMuted((m) => {
+      const next = !m;
+      setSfxMuted(next);
+      try {
+        window.localStorage.setItem('shibu:muted', next ? '1' : '0');
+      } catch {
+        /* ignore */
+      }
+      return next;
+    });
+  }, []);
+
+  /* per-journal reading progress (persisted) */
+  const progressKey = (id: string) => `shibu:progress:${id}`;
+  const loadProgress = useCallback((id: string): number => {
+    try {
+      const v = Number(window.localStorage.getItem(progressKey(id)) ?? '0');
+      return Number.isFinite(v) && v > 0 ? Math.floor(v) : 0;
+    } catch {
+      return 0;
+    }
+  }, []);
+  const saveProgress = useCallback((id: string, spread: number) => {
+    try {
+      window.localStorage.setItem(progressKey(id), String(Math.max(0, Math.floor(spread))));
+    } catch {
+      /* ignore */
+    }
+  }, []);
 
   const selected = useMemo(
     () => journals.find((j) => j.id === selectedId) ?? null,
@@ -143,10 +186,11 @@ export default function SketchApp() {
         const res = await fetch(`/api/sketch/journals/${id}`, { cache: 'no-store' });
         if (!res.ok) throw new Error('not found');
         const data = (await res.json()) as { journal: JournalDetailDTO };
+        const startSpread = Math.min(loadProgress(data.journal.id), Math.max(0, Math.ceil(data.journal.pages.length / 2) - 1));
         setDetail(data.journal);
-        setSpread(0);
+        setSpread(startSpread);
         setView('opening');
-        engineRef.current?.openJournal(data.journal, 0);
+        engineRef.current?.openJournal(data.journal, startSpread);
       } catch {
         toast('Could not open journal', 'destructive');
       }
@@ -156,6 +200,8 @@ export default function SketchApp() {
 
   const openRef = useRef(openJournalById);
   openRef.current = openJournalById;
+  const saveProgressRef = useRef(saveProgress);
+  saveProgressRef.current = saveProgress;
 
   const detailRef = useRef<JournalDetailDTO | null>(null);
   detailRef.current = detail;
@@ -172,7 +218,11 @@ export default function SketchApp() {
         setView('shelf');
         setDetail(null);
       },
-      onSpreadChange: (k) => setSpread(k),
+      onSpreadChange: (k) => {
+        setSpread(k);
+        const cur = detailRef.current;
+        if (cur) saveProgressRef.current(cur.id, k);
+      },
       onEditPage: (pageIndex) => {
         const cur = detailRef.current;
         if (!cur) return;
@@ -199,6 +249,31 @@ export default function SketchApp() {
   journalsRef.current = journals;
   const selectedRef = useRef(selectedId);
   selectedRef.current = selectedId;
+
+  /* cover settings button — anchored to the selected journal's cover corner */
+  const settingsBtnRef = useRef<HTMLButtonElement | null>(null);
+  const settingsVisibleRef = useRef(false);
+  settingsVisibleRef.current = view === 'shelf' && !!selectedId && !booting;
+  useEffect(() => {
+    let raf = 0;
+    const tick = () => {
+      raf = requestAnimationFrame(tick);
+      const btn = settingsBtnRef.current;
+      if (!btn) return;
+      const engine = engineRef.current;
+      const anchor = settingsVisibleRef.current && engine ? engine.screenAnchor : null;
+      if (anchor) {
+        btn.style.opacity = '1';
+        btn.style.pointerEvents = 'auto';
+        btn.style.transform = `translate(${anchor.x - 44}px, ${anchor.y - 10}px)`;
+      } else {
+        btn.style.opacity = '0';
+        btn.style.pointerEvents = 'none';
+      }
+    };
+    raf = requestAnimationFrame(tick);
+    return () => cancelAnimationFrame(raf);
+  }, []);
 
   /* ------------------------------------------------------------ */
   /* actions                                                       */
@@ -436,6 +511,22 @@ export default function SketchApp() {
       {/* 3D host */}
       <div ref={hostRef} className="absolute inset-0" role="application" aria-label="Shibu Sketch 3D journals" />
 
+      {/* cover settings — floats over the selected journal's cover corner */}
+      <button
+        ref={settingsBtnRef}
+        type="button"
+        aria-label="Journal settings"
+        onClick={() => {
+          setRenameValue(selected?.title ?? '');
+          setMenuOpen(true);
+          playTap();
+        }}
+        className="absolute left-0 top-0 z-20 flex size-9 items-center justify-center rounded-full bg-white/90 text-zinc-700 shadow-lg shadow-black/25 transition hover:bg-white active:scale-95"
+        style={{ opacity: 0, pointerEvents: 'none' }}
+      >
+        <SlidersHorizontal className="size-4" />
+      </button>
+
       {booting && (
         <div className="absolute inset-0 z-50 flex flex-col items-center justify-center gap-3 bg-[#8b88a6] text-white">
           <div className="flex items-end gap-1">
@@ -455,6 +546,8 @@ export default function SketchApp() {
           onGrid={() => setGridOpen(true)}
           onSearch={() => setSearchOpen(true)}
           onMenu={() => setAboutOpen(true)}
+          soundMuted={soundMuted}
+          onToggleSound={toggleSound}
         />
       ) : (
         <OpenTopBar
@@ -462,6 +555,8 @@ export default function SketchApp() {
           onGrid={() => setGridOpen(true)}
           onSearch={() => setSearchOpen(true)}
           onMenu={() => setMenuOpen(true)}
+          soundMuted={soundMuted}
+          onToggleSound={toggleSound}
         />
       )}
 

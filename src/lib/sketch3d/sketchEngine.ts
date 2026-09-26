@@ -124,6 +124,10 @@ export class SketchEngine {
   private camFov = 33;
 
   private pointerDownInfo: { x: number; y: number; t: number; id: string } | null = null;
+
+  /** Screen position (CSS px) of the selected journal's cover top-right corner.
+   *  Updated every frame in shelf mode; null otherwise. */
+  screenAnchor: { x: number; y: number } | null = null;
   private lastTapTime = 0;
   private lastTapTarget: string | null = null;
 
@@ -452,6 +456,7 @@ export class SketchEngine {
     entry.obj.coverPivot.rotation.z = 0;
     entry.obj.offset.rotation.y = 0;
     // hide everything that belongs to the open pose
+    entry.obj.flipShadow.visible = false;
     entry.obj.leftContent.visible = false;
     entry.obj.rightContent.visible = false;
     entry.obj.leftWell.visible = false;
@@ -653,6 +658,23 @@ export class SketchEngine {
     bendSheet(obj.flipEdge.geometry, theta, 0.95, dir === 1 ? 1 : -1);
     // the underside plane becomes visible once it rotates past vertical
     obj.flipBack.visible = theta > HALF_PI * 1.03;
+
+    // moving shadow that follows the curling page across the spread
+    const flipY = COVER_T + (this.flip.dir === 1
+      ? (journalDims(this.pageCount).sheets - this.flip.from - 0.5) * SHEET_T
+      : (this.flip.from - 0.5) * SHEET_T);
+    const stackTopNow = COVER_T + journalDims(this.pageCount).sheets * SHEET_T;
+    const shadow = obj.flipShadow;
+    shadow.visible = true;
+    shadow.position.set(
+      Math.cos(theta) * JOURNAL_W * 0.52 * dir,
+      Math.min(flipY + SHEET_T * 2, stackTopNow + 0.004),
+      0,
+    );
+    shadow.rotation.z = Math.sin(theta) * 0.35 * dir;
+    const shScale = 0.75 + Math.sin(theta) * 0.35;
+    shadow.scale.set(shScale, shScale * 0.9, 1);
+    (shadow.material as THREE.MeshBasicMaterial).opacity = 0.3 * Math.sin(theta);
     obj.flipFront.renderOrder = 20;
     obj.flipBack.renderOrder = 21;
     obj.flipEdge.renderOrder = 19;
@@ -663,6 +685,7 @@ export class SketchEngine {
     if (t >= 1) {
       this.flip.active = false;
       obj.flipGroup.visible = false;
+      obj.flipShadow.visible = false;
       obj.offset.rotation.y = 0;
       this.spread = from + dir;
       this.layoutOpenSpread(this.spread, false);
@@ -908,9 +931,33 @@ export class SketchEngine {
       this.camera.updateProjectionMatrix();
     }
 
+    this.updateScreenAnchor();
     this.sun.position.set(this.camPos.x - 2.2, 4.2, this.camPos.z + 2.6);
     this.renderer.render(this.scene, this.camera);
   };
+
+  private anchorV = new THREE.Vector3();
+  private updateScreenAnchor(): void {
+    if (this.mode !== 'shelf' || !this.selectedId) {
+      this.screenAnchor = null;
+      return;
+    }
+    const entry = this.journals.get(this.selectedId);
+    if (!entry) {
+      this.screenAnchor = null;
+      return;
+    }
+    const { sheets: S } = journalDims(entry.dto.pageCount);
+    // cover top-right corner in book-local space
+    this.anchorV.set(JOURNAL_W * 0.94, COVER_T + S * SHEET_T + COVER_T * 0.5, -JOURNAL_H * 0.4);
+    entry.obj.offset.localToWorld(this.anchorV);
+    this.anchorV.project(this.camera);
+    const rect = this.renderer.domElement.getBoundingClientRect();
+    this.screenAnchor = {
+      x: ((this.anchorV.x + 1) / 2) * rect.width,
+      y: ((1 - this.anchorV.y) / 2) * rect.height,
+    };
+  }
 
   private updateCameraFit(): void {
     if (this.mode !== 'shelf') return;
@@ -1059,6 +1106,8 @@ export class SketchEngine {
     );
     this.raycaster.setFromCamera(ndc, this.camera);
     const targets = [
+      entry.obj.tapZoneR,
+      entry.obj.tapZoneL,
       ...entry.obj.sheets,
       entry.obj.rightContent,
       entry.obj.leftContent,
@@ -1070,8 +1119,10 @@ export class SketchEngine {
     if (hits.length === 0) return null;
     // offset local space: spine at x=0; right page spans 0..W, left page -W..0
     const p = entry.obj.offset.worldToLocal(hits[0].point.clone());
-    const side: 1 | -1 = p.x >= 0 ? 1 : -1;
-    return { side, bookX: p.x, localZ: p.z };
+    // clamp into the page rect so edge taps map onto the nearest page point
+    const clampedX = Math.max(-JOURNAL_W, Math.min(JOURNAL_W, p.x));
+    const side: 1 | -1 = clampedX >= 0 ? 1 : -1;
+    return { side, bookX: clampedX, localZ: Math.max(-JOURNAL_H / 2, Math.min(JOURNAL_H / 2, p.z)) };
   }
 
   private bindEvents(): void {
