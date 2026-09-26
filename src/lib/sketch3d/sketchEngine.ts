@@ -35,11 +35,13 @@ const SELECT_LIFT = 0.13;
 /** height the dragged book hovers at during shelf/grid drag-to-reorder —
  *  pointer raycasts use this plane so the book tracks the cursor exactly */
 const REORDER_LIFT_Y = 0.32;
-/** height the selected book lifts to as the fore-edge bar before blooming */
-const OPEN_LIFT = 0.3;
+/** The open journal floats UPRIGHT at eye level — the reference never lays
+ *  the book onto a table; the spread faces the camera against the plain wall
+ *  with a gentle standing fan on both sides. */
+const OPEN_CENTER_Y = 1.02;
 /** choreography timings tuned against the reference recording:
- *  slide-away ≈ 0.45s → bloom pop ≈ 0.2s → flatten ≈ 0.33s → settle */
-const OPEN_DUR = 1.15;
+ *  slide-away ≈ 0.28s → bloom pop ≈ 0.12s → turn to face ≈ 0.22s → settle */
+const OPEN_DUR = 0.7;
 const CLOSE_DUR = 0.68;
 const FLIP_DUR = 0.4;
 const SELECT_DUR = 0.45;
@@ -49,10 +51,6 @@ const easeOut = (t: number): number => 1 - (1 - t) * (1 - t);
 const easeOutCubic = (t: number): number => 1 - Math.pow(1 - t, 3);
 const clamp01 = (t: number): number => Math.min(1, Math.max(0, t));
 const lerp = (a: number, b: number, t: number): number => a + (b - a) * t;
-
-const X_AXIS = new THREE.Vector3(1, 0, 0);
-const Y_AXIS = new THREE.Vector3(0, 1, 0);
-const Q_IDENTITY = new THREE.Quaternion();
 
 export interface SketchEngineCallbacks {
   /** tapped the already-selected journal -> app opens it */
@@ -414,9 +412,9 @@ export class SketchEngine {
     this.pagesData = detail.pages.map((p) => ({ id: p.id, content: p.content }));
     this.paperColor = detail.paperColor || '#faf8f4';
     this.spread = Math.max(0, Math.min(keepSpread, this.spreadCount() - 1));
-    // pose directly in open state
-    entry.obj.stand.rotation.x = 0;
-    entry.obj.root.position.set(0, 0, 0);
+    // pose directly in open state (upright, floating at eye level)
+    entry.obj.stand.rotation.x = HALF_PI;
+    entry.obj.root.position.set(0, OPEN_CENTER_Y, 0);
     entry.obj.root.rotation.set(0, 0, 0);
     entry.obj.root.scale.setScalar(1);
     // a freshly added journal stands in closed pose — flatten the spine column
@@ -675,8 +673,9 @@ export class SketchEngine {
     // the screen edge-to-edge (like the reference fullscreen page)
     const over = 1.18;
     const dist = Math.min(JOURNAL_W / (2 * tanF * aspect * over), JOURNAL_H / (2 * tanF * over));
-    // a hair of Z offset keeps lookAt stable and the gutter vertical on screen
-    const pos = center.clone().add(new THREE.Vector3(0, dist, dist * 0.045));
+    // a hair of Y offset keeps lookAt stable and the gutter vertical on screen
+    // (the upright spread faces +Z, so the zoom camera rides the page normal)
+    const pos = center.clone().add(new THREE.Vector3(0, dist * 0.045, dist));
     return { pos, look: center, fov };
   }
 
@@ -689,7 +688,7 @@ export class SketchEngine {
     const side: 1 | -1 = pageIndex % 2 === 0 ? -1 : 1;
     // freeze the idle float so the page lands perfectly still
     const entry = this.openEntry;
-    entry.obj.root.position.y = 0;
+    entry.obj.root.position.y = OPEN_CENTER_Y;
     entry.obj.root.rotation.z = 0;
     this.pageZoom = {
       active: true,
@@ -786,23 +785,19 @@ export class SketchEngine {
     for (let i = 0; i < S; i++) {
       const mesh = obj.sheets[i];
       mesh.visible = true;
-      const pose = (k: number): { y: number; rz: number } => {
+      const pose = (k: number): { x: number; y: number; z: number; rz: number } => {
         if (i < k) {
-          const depth = k - 1 - i;
-          return {
-            y: COVER_T + (i + 0.5) * SHEET_T,
-            rz: depth === 0 ? Math.PI : Math.PI + this.fanAngle(depth),
-          };
+          const p = this.fanPose(k - 1 - i, true);
+          return { x: p.x, y: COVER_T + (i + 0.5) * SHEET_T, z: p.z, rz: p.rz };
         }
-        const depth = i - k;
-        return {
-          y: stackTop - (i + 0.5) * SHEET_T,
-          rz: depth === 0 ? 0 : -this.fanAngle(depth),
-        };
+        const p = this.fanPose(i - k, false);
+        return { x: p.x, y: stackTop - (i + 0.5) * SHEET_T, z: p.z, rz: p.rz };
       };
       const a = pose(k0);
       const b = pose(k1);
+      mesh.position.x = lerp(a.x, b.x, u);
       mesh.position.y = lerp(a.y, b.y, u);
+      mesh.position.z = lerp(a.z, b.z, u);
       mesh.rotation.z = lerp(a.rz, b.rz, u);
     }
   }
@@ -976,6 +971,7 @@ export class SketchEngine {
     entry.obj.flipGroup.visible = false;
     entry.obj.gutterShade.visible = false;
     for (const f of entry.obj.sheetFaces) f.visible = false;
+    for (const b of entry.obj.sheetBacks) b.visible = false;
     // restore the spine column (it flattens while the book is open)
     entry.obj.spine.scale.y = 1;
     if (entry.obj.spine.userData.baseY != null) {
@@ -1016,35 +1012,43 @@ export class SketchEngine {
     return tex;
   }
 
-  /** Open-pose camera direction (keeps the desktop viewing angle). */
-  private openCamDir = new THREE.Vector3(0, 0.655, 0.757);
+  /** Open-pose camera direction — straight-on at the upright spread (a hair
+   *  above horizontal, like the reference's near-orthographic reading view). */
+  private openCamDir = new THREE.Vector3(0, 0.1, 0.995);
 
   /** Open-pose camera target — fits the whole spread at ANY aspect ratio.
-   *  Distance solves both the vertical (page depth) and horizontal
+   *  Distance solves both the vertical (page height) and horizontal
    *  (both pages) constraints; portrait phones pull way back. */
   private openCamTarget(): { pos: THREE.Vector3; look: THREE.Vector3; fov: number } {
     const aspect = this.camera.aspect || 1;
     const fov = aspect < 0.9 ? 44 : 36;
     const tanF = Math.tan((fov * Math.PI) / 360);
-    const needV = JOURNAL_H * 1.38; // page depth + breathing room
-    const needW = JOURNAL_W * 2 + 0.3; // both pages + margin
+    const needV = JOURNAL_H * 1.42; // spread height + breathing room (title clearance)
+    const needW = JOURNAL_W * 2 + 0.34; // both pages + fan margin
     const dist = Math.max(needV / (2 * tanF), needW / (2 * tanF * aspect));
     return {
       pos: new THREE.Vector3(
         this.openCamDir.x * dist,
-        this.openCamDir.y * dist,
+        OPEN_CENTER_Y + this.openCamDir.y * dist,
         this.openCamDir.z * dist,
       ),
-      look: new THREE.Vector3(0, 0.03, 0),
+      look: new THREE.Vector3(0, OPEN_CENTER_Y, 0),
       fov,
     };
   }
 
-  /** Fan angle for a sheet `depth` steps below its stack's top sheet.
-   *  Gentle ribbed cascade (reference shows ~6-14deg per sheet — deep dips
-   *  pierce the back cover and the table). */
-  private fanAngle(depth: number): number {
-    return Math.min(0.4, 0.09 + Math.max(0, depth - 1) * 0.045);
+  /** Standing-fan cascade pose for a sheet `depth` steps below its stack's
+   *  top. The reference fans the open book's pages like a hand of cards:
+   *  each deeper sheet slides outward past the one in front and drops a hair
+   *  lower — the ribbed cascade that makes the open book read wider than its
+   *  spread. Sheets only ever tip AWAY from the reader so they can never
+   *  cover the spread content planes. */
+  private fanPose(depth: number, left: boolean): { x: number; z: number; rz: number } {
+    const d = Math.min(depth, 5);
+    const shift = Math.min(0.115 * d, 0.58) * JOURNAL_W;
+    const tip = Math.min(0.035 * d, 0.16);
+    const drop = 0.02 * d;
+    return left ? { x: -shift, z: drop, rz: Math.PI + tip } : { x: shift, z: drop, rz: -tip };
   }
 
   /** Lay out stacks + content planes for a spread. */
@@ -1061,14 +1065,14 @@ export class SketchEngine {
       mesh.visible = true;
       if (i < k) {
         const depth = k - 1 - i; // 0 = top of the left pile
-        mesh.position.set(0, COVER_T + (i + 0.5) * SHEET_T, 0);
-        // PI + theta dips the fore-edge BELOW the page plane (mirrors the
-        // right stack). PI - theta would sweep the fan UP over the content.
-        mesh.rotation.z = depth === 0 ? Math.PI : Math.PI + this.fanAngle(depth);
+        const p = this.fanPose(depth, true);
+        mesh.position.set(p.x, COVER_T + (i + 0.5) * SHEET_T, p.z);
+        mesh.rotation.z = p.rz;
       } else {
         const depth = i - k; // 0 = top of the right stack
-        mesh.position.set(0, stackTop - (i + 0.5) * SHEET_T, 0);
-        mesh.rotation.z = depth === 0 ? 0 : -this.fanAngle(depth);
+        const p = this.fanPose(depth, false);
+        mesh.position.set(p.x, stackTop - (i + 0.5) * SHEET_T, p.z);
+        mesh.rotation.z = p.rz;
       }
     }
     // center the open spread on the spine
@@ -1092,6 +1096,9 @@ export class SketchEngine {
     applyPageTexture(obj.rightContent, rightIdx, this.textures, this.paperColor);
     obj.rightContent.visible = show && rightIdx < this.pageCount;
     for (const f of obj.sheetFaces) f.visible = false;
+    // page backs ride the stacks while reading — they give the standing fan
+    // its content slivers (reference shows sketch fragments through the fan)
+    for (const b of obj.sheetBacks) b.visible = show;
 
     // wells (paper liner over the covers' inner faces)
     obj.rightWell.rotation.z = 0;
@@ -1122,14 +1129,14 @@ export class SketchEngine {
         mesh.visible = false;
       } else if (i < leftCount) {
         mesh.visible = true;
-        const depth = leftCount - 1 - i;
-        mesh.position.set(0, COVER_T + (i + 0.5) * SHEET_T, 0);
-        mesh.rotation.z = depth === 0 ? Math.PI : Math.PI + this.fanAngle(depth);
+        const p = this.fanPose(leftCount - 1 - i, true);
+        mesh.position.set(p.x, COVER_T + (i + 0.5) * SHEET_T, p.z);
+        mesh.rotation.z = p.rz;
       } else if (i >= rightFrom) {
         mesh.visible = true;
-        const depth = i - rightFrom;
-        mesh.position.set(0, stackTop - (i + 0.5) * SHEET_T, 0);
-        mesh.rotation.z = depth === 0 ? 0 : -this.fanAngle(depth);
+        const p = this.fanPose(i - rightFrom, false);
+        mesh.position.set(p.x, stackTop - (i + 0.5) * SHEET_T, p.z);
+        mesh.rotation.z = p.rz;
       }
     }
     // during flight the static content planes hide (the flying sheet shows its faces)
@@ -1247,9 +1254,10 @@ export class SketchEngine {
    *  2. BLOOM  (0.40 → 0.57) the cover + sheets POP open around the vertical
    *     spine into a symmetric standing fan (left pages sweep wide, right
    *     stack cracks open slightly).
-   *  3. FLATTEN (0.57 → 0.86) the standing fan tips over onto the table via a
-   *     single quaternion slerp while sheets cascade into their stacks.
-   *  4. SETTLE (0.86 → 1.0) camera dollies into the final reading fit.
+   *  3. TURN   (0.57 → 0.88) the upright book yaws back to face the camera
+   *     while the fan cascades into its stacks — the book NEVER tips over or
+   *     descends (reference keeps it floating at eye level, spread facing in).
+   *  4. SETTLE (0.88 → 1.0) camera dollies into the final reading fit.
    */
   private updateOpening(now: number): void {
     const entry = this.openEntry;
@@ -1278,46 +1286,38 @@ export class SketchEngine {
     /* --- phase easings --- */
     const eSlide = easeInOut(clamp01(t / 0.4));
     const eBloom = easeOutCubic(clamp01((t - 0.4) / 0.17));
-    const eFlat = easeInOut(clamp01((t - 0.57) / 0.29));
-    const eSettle = easeInOut(clamp01((t - 0.86) / 0.14));
+    const eTurn = easeInOut(clamp01((t - 0.57) / 0.31));
+    const eSettle = easeInOut(clamp01((t - 0.88) / 0.12));
 
-    /* --- stand: settle into the vertical bar (grid opens stand up here) --- */
-    obj.stand.rotation.x =
-      eFlat <= 0 ? lerp(this.openStartStand, HALF_PI, eSlide) : HALF_PI * (1 - eFlat);
+    /* --- stand: upright the whole way (grid opens stand up here) --- */
+    obj.stand.rotation.x = lerp(this.openStartStand, HALF_PI, eSlide);
 
-    /* --- root: lift + quarter-turn yaw to the fore-edge bar --- */
+    /* --- root: lift to eye level + quarter-turn yaw to the fore-edge bar,
+     *        then stay at that height while the book turns to face in --- */
     const baseY = this.openStartRootY || SHELF_BASE_Y + SELECT_LIFT;
-    const liftY = SHELF_BASE_Y + OPEN_LIFT;
-    root.position.y = eFlat <= 0 ? lerp(baseY, liftY, eSlide) : lerp(liftY, 0, eFlat);
+    root.position.y = lerp(baseY, OPEN_CENTER_Y, eSlide);
     root.position.x = lerp(root.position.x, 0, eSlide);
     root.position.z = lerp(root.position.z, 0, eSlide);
     root.rotation.z = lerp(this.openStartRoll, 0, eSlide);
-    root.scale.setScalar(eFlat <= 0 ? lerp(1, 1.02, eSlide) : lerp(1.02, 1, eFlat));
+    root.scale.setScalar(eTurn <= 0 ? lerp(1, 1.02, eSlide) : lerp(1.02, 1, eTurn));
 
-    if (eFlat <= 0) {
-      // euler branch: bar pose (cover swings around the vertical spine)
-      root.rotation.y = lerp(this.openStartYaw, -HALF_PI, eSlide);
-    } else {
-      // quaternion branch: single slerp from the bloomed bar to flat
-      const qStand = new THREE.Quaternion().setFromAxisAngle(X_AXIS, HALF_PI * (1 - eFlat));
-      const qBar = new THREE.Quaternion()
-        .setFromAxisAngle(Y_AXIS, -HALF_PI)
-        .multiply(new THREE.Quaternion().setFromAxisAngle(X_AXIS, HALF_PI));
-      const qWorld = qBar.slerp(Q_IDENTITY, eFlat);
-      root.quaternion.copy(qWorld).multiply(qStand.clone().invert());
-    }
+    // yaw: shelf → bar (-90°) during the slide, bar → face-on during the turn
+    root.rotation.y =
+      eTurn <= 0
+        ? lerp(this.openStartYaw, -HALF_PI, eSlide)
+        : lerp(-HALF_PI, 0, eTurn);
 
     // re-center: closed book centers on its cover; open spread centers on the spine
-    obj.offset.position.x = eFlat <= 0 ? -JOURNAL_W / 2 : lerp(-JOURNAL_W / 2, 0, eFlat);
+    obj.offset.position.x = eTurn <= 0 ? -JOURNAL_W / 2 : lerp(-JOURNAL_W / 2, 0, eTurn);
 
     /* --- cover: swings open around the spine while blooming --- */
     const closedY = obj.coverPivot.userData.closedY as number;
     const openY = COVER_T / 2 + 0.0006;
     const coverBloom = 1.85; // ~106deg — cover points left-back mid-bloom (reference pose)
     obj.coverPivot.rotation.z =
-      eFlat <= 0
+      eTurn <= 0
         ? eBloom * coverBloom
-        : lerp(coverBloom, Math.PI, easeOut(clamp01(eFlat * 1.8)));
+        : lerp(coverBloom, Math.PI, easeOut(clamp01(eTurn * 1.8)));
     obj.coverPivot.position.y = lerp(closedY, openY, easeInOut(clamp01((eBloom - 0.35) / 0.55)));
 
     /* --- sheets: closed block → bloom fan → cascade into stacks --- */
@@ -1327,36 +1327,40 @@ export class SketchEngine {
       const mesh = obj.sheets[i];
       mesh.visible = true;
       const left = i < this.spread;
-      const d = left ? this.spread - 1 - i : i - this.spread;
-      const bloomAngle = left ? 1.15 + d * 0.34 : -(0.32 + d * 0.09);
-      const restAngle = left ? Math.PI + this.fanAngle(d) : -this.fanAngle(d);
+      const depth = left ? this.spread - 1 - i : i - this.spread;
+      const rest = this.fanPose(depth, left);
+      const bloomAngle = left ? 1.15 + depth * 0.34 : -(0.32 + depth * 0.09);
       const closedSlot = stackTop - (i + 0.5) * SHEET_T;
       const restY = left ? COVER_T + (i + 0.5) * SHEET_T : closedSlot;
-      mesh.position.y = eFlat <= 0 ? closedSlot : lerp(closedSlot, restY, eFlat);
+      mesh.position.x = eTurn <= 0 ? 0 : lerp(0, rest.x, eTurn);
+      mesh.position.z = eTurn <= 0 ? 0 : lerp(0, rest.z, eTurn);
+      mesh.position.y = eTurn <= 0 ? closedSlot : lerp(closedSlot, restY, eTurn);
       mesh.rotation.z =
-        eFlat <= 0 ? bloomAngle * eBloom : lerp(bloomAngle, restAngle, eFlat);
+        eTurn <= 0 ? bloomAngle * eBloom : lerp(bloomAngle, rest.rz, eTurn);
       const face = obj.sheetFaces[i];
       if (face) face.visible = t > 0.42 && t < 0.99;
+      const back = obj.sheetBacks[i];
+      if (back) back.visible = t > 0.42;
     }
 
-    // spine flattens into the gutter as the book lays down
-    this.setSpineFlat(obj, eFlat);
+    // spine column melts into the gutter as the spread opens
+    this.setSpineFlat(obj, eTurn);
 
-    /* --- camera: shelf pose → slight push-in (hold) → arc up → dolly in --- */
+    /* --- camera: shelf pose → fore-edge bar push-in → pull to reading fit --- */
     const oc = this.openCamTarget();
     if (t < 0.57) {
       const u = easeInOut(clamp01(t / 0.4));
       this.camPos.set(
         0,
-        lerp(this.openCamStart.pos.y, 1.0, u),
-        lerp(this.openCamStart.pos.z, 4.8, u),
+        lerp(this.openCamStart.pos.y, 1.06, u),
+        lerp(this.openCamStart.pos.z, 3.6, u),
       );
-      this.camLook.set(0, lerp(this.openCamStart.look.y, 0.64, u), 0);
+      this.camLook.set(0, lerp(this.openCamStart.look.y, 0.68, u), 0);
       this.camFov = lerp(this.openCamStart.fov, 34, u);
     } else {
-      const mid = easeInOut(clamp01((t - 0.57) / 0.29));
-      const startPos = new THREE.Vector3(0, 1.0, 4.8);
-      const startLook = new THREE.Vector3(0, 0.64, 0);
+      const mid = easeInOut(clamp01((t - 0.57) / 0.31));
+      const startPos = new THREE.Vector3(0, 1.06, 3.6);
+      const startLook = new THREE.Vector3(0, 0.68, 0);
       const farPos = oc.pos.clone().multiplyScalar(0.94);
       const endPos = farPos.lerp(oc.pos, eSettle);
       this.camPos.lerpVectors(startPos, endPos, mid);
@@ -1366,11 +1370,11 @@ export class SketchEngine {
 
     if (t >= 1) {
       this.mode = 'open';
-      root.position.set(0, 0, 0);
+      root.position.set(0, OPEN_CENTER_Y, 0);
       root.quaternion.identity();
       root.rotation.set(0, 0, 0);
       root.scale.setScalar(1);
-      obj.stand.rotation.x = 0;
+      obj.stand.rotation.x = HALF_PI;
       obj.offset.position.x = 0;
       const occ = this.openCamTarget();
       this.camPos.copy(occ.pos);
@@ -1396,9 +1400,10 @@ export class SketchEngine {
 
   /**
    * CLOSE choreography (the open run in reverse, snappier — matched to the
-   * reference): the flat spread rises back into the standing fan while the
-   * camera pulls up, the fan folds into the closed bar, the bar spins back
-   * cover-forward and settles into the shelf as the neighbors return.
+   * reference): the upright spread gathers into a standing fan and folds shut
+   * while FACING the camera (no edge-on detour), then the closed book
+   * descends back into its shelf slot as the camera pulls out and the
+   * neighbors return.
    */
   private updateClosing(now: number): void {
     const entry = this.openEntry;
@@ -1421,42 +1426,30 @@ export class SketchEngine {
     }
 
     /* --- phases --- */
-    const eTip = easeInOut(clamp01(t / 0.42)); // flat → standing fan
-    const eFold = easeInOut(clamp01((t - 0.3) / 0.4)); // fan → closed bar
-    const eYaw = easeInOut(clamp01((t - 0.55) / 0.45)); // bar spins cover-forward + settles
+    const eGather = easeInOut(clamp01(t / 0.42)); // spread → standing fan
+    const eFold = easeInOut(clamp01((t - 0.3) / 0.4)); // fan → closed block
+    const eDesc = easeInOut(clamp01((t - 0.55) / 0.45)); // descend + camera out
 
-    /* --- orientation: world slerp I → bar, then the quarter-turn back --- */
-    const qStand = new THREE.Quaternion().setFromAxisAngle(X_AXIS, HALF_PI * eTip);
-    const qBar = new THREE.Quaternion()
-      .setFromAxisAngle(Y_AXIS, -HALF_PI)
-      .multiply(new THREE.Quaternion().setFromAxisAngle(X_AXIS, HALF_PI));
-    const qWorld = Q_IDENTITY.clone().slerp(qBar, eTip);
-    if (eYaw > 0) {
-      const qSpin = new THREE.Quaternion().setFromAxisAngle(Y_AXIS, HALF_PI * eYaw);
-      qWorld.premultiply(qSpin);
-    }
-    root.quaternion.copy(qWorld).multiply(qStand.clone().invert());
-    obj.stand.rotation.x = HALF_PI * eTip;
-
-    /* --- position: rise off the table, then settle into the shelf slot --- */
-    const liftY = SHELF_BASE_Y + OPEN_LIFT;
-    root.position.y = eYaw <= 0 ? lerp(0, liftY, eTip) : lerp(liftY, SHELF_BASE_Y + SELECT_LIFT, eYaw);
-    root.position.x = 0;
-    root.position.z = 0;
+    /* --- orientation: upright the whole way, no yaw detour --- */
+    root.rotation.set(0, 0, 0);
+    obj.stand.rotation.x = HALF_PI;
     root.scale.setScalar(1);
+
+    /* --- position: float at eye level, then settle into the shelf slot --- */
+    root.position.set(0, lerp(OPEN_CENTER_Y, SHELF_BASE_Y + SELECT_LIFT, eDesc), 0);
 
     /* --- re-center toward the closed book (cover-centered) --- */
     obj.offset.position.x = lerp(0, -JOURNAL_W / 2, easeInOut(clamp01((t - 0.25) / 0.45)));
 
     /* --- cover folds shut (reverse of the bloom sweep) --- */
     const closedY = obj.coverPivot.userData.closedY as number;
-    obj.coverPivot.rotation.z = lerp(Math.PI, 1.85, eTip);
+    obj.coverPivot.rotation.z = lerp(Math.PI, 1.85, eGather);
     obj.coverPivot.rotation.z = lerp(obj.coverPivot.rotation.z, 0, eFold);
-    obj.coverPivot.position.y = lerp(COVER_T / 2 + 0.0006, closedY, Math.max(eTip * 0.4, eFold));
+    obj.coverPivot.position.y = lerp(COVER_T / 2 + 0.0006, closedY, Math.max(eGather * 0.4, eFold));
 
     /* --- sheets: rest stacks → bloom fan (gather) → closed block --- */
-    // static spread planes hide immediately; the per-sheet faces carry the
-    // content during the gather (like the reference)
+    // static spread planes hide immediately; the per-sheet faces + backs carry
+    // the content during the gather (like the reference)
     obj.leftContent.visible = false;
     obj.rightContent.visible = false;
     const { sheets: S } = journalDims(this.pageCount);
@@ -1466,30 +1459,35 @@ export class SketchEngine {
       mesh.visible = true;
       const left = i < this.spread;
       const d = left ? this.spread - 1 - i : i - this.spread;
-      const restAngle = left ? Math.PI + this.fanAngle(d) : -this.fanAngle(d);
+      const rest = this.fanPose(d, left);
       const bloomAngle = left ? 1.15 + d * 0.34 : -(0.32 + d * 0.09);
       const restY = left ? COVER_T + (i + 0.5) * SHEET_T : stackTop - (i + 0.5) * SHEET_T;
       const closedSlot = stackTop - (i + 0.5) * SHEET_T;
-      mesh.position.y = lerp(restY, closedSlot, Math.max(eTip, eFold));
-      const gathered = lerp(restAngle, bloomAngle, eTip);
+      const eGath = Math.max(eGather, eFold);
+      mesh.position.x = lerp(rest.x, 0, eGath);
+      mesh.position.z = lerp(rest.z, 0, eGath);
+      mesh.position.y = lerp(restY, closedSlot, eGath);
+      const gathered = lerp(rest.rz, bloomAngle, eGather);
       mesh.rotation.z = lerp(gathered, 0, eFold);
       const face = obj.sheetFaces[i];
       if (face) face.visible = t < 0.72;
+      const back = obj.sheetBacks[i];
+      if (back) back.visible = t < 0.9;
     }
 
-    this.setSpineFlat(obj, 1 - eTip);
+    this.setSpineFlat(obj, 1 - eFold);
 
-    /* --- camera: reading fit → pull up/back → shelf pose --- */
+    /* --- camera: reading fit → pull out → shelf pose --- */
     const ocStart = this.openCamTarget();
     if (t < 0.55) {
       const u = easeInOut(t / 0.55);
-      this.camPos.lerpVectors(ocStart.pos, new THREE.Vector3(0, 1.0, 4.8), u);
-      this.camLook.lerpVectors(ocStart.look, new THREE.Vector3(0, 0.64, 0), u);
+      this.camPos.lerpVectors(ocStart.pos, new THREE.Vector3(0, 1.06, 4.4), u);
+      this.camLook.lerpVectors(ocStart.look, new THREE.Vector3(0, 0.7, 0), u);
       this.camFov = lerp(ocStart.fov, 34, u);
     } else {
       const u = easeInOut((t - 0.55) / 0.45);
-      this.camPos.lerpVectors(new THREE.Vector3(0, 1.0, 4.8), this.openCamStart.pos, u);
-      this.camLook.lerpVectors(new THREE.Vector3(0, 0.64, 0), this.openCamStart.look, u);
+      this.camPos.lerpVectors(new THREE.Vector3(0, 1.06, 4.4), this.openCamStart.pos, u);
+      this.camLook.lerpVectors(new THREE.Vector3(0, 0.7, 0), this.openCamStart.look, u);
       this.camFov = lerp(34, this.openCamStart.fov, u);
     }
 
@@ -1502,6 +1500,8 @@ export class SketchEngine {
       this.camera.lookAt(this.camLook);
       this.camera.fov = this.camFov;
       this.camera.updateProjectionMatrix();
+      for (const f of obj.sheetFaces) f.visible = false;
+      for (const b of obj.sheetBacks) b.visible = false;
       this.layoutAll();
       this.cb.onCloseComplete();
     }
@@ -1628,7 +1628,7 @@ export class SketchEngine {
             : 0;
           entry.obj.offset.rotation.y = lerp(entry.obj.offset.rotation.y, lean, 0.25);
           if (!this.openDragActive) {
-            entry.obj.root.position.y = Math.sin(now * 0.8) * 0.008;
+            entry.obj.root.position.y = OPEN_CENTER_Y + Math.sin(now * 0.8) * 0.008;
             entry.obj.root.rotation.z = Math.sin(now * 0.5) * 0.004;
           }
         }

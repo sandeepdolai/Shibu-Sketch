@@ -60,6 +60,9 @@ export interface JournalObject {
   rightWell: THREE.Mesh;
   /** per-sheet top-face content planes (visible only during open/close bloom) */
   sheetFaces: THREE.Mesh[];
+  /** per-sheet bottom-face content planes (page backs — visible while reading,
+   *  they give the standing fan its content slivers like the reference) */
+  sheetBacks: THREE.Mesh[];
   tapZoneL: THREE.Mesh;
   tapZoneR: THREE.Mesh;
   /** soft static shading along the gutter (visible while reading) */
@@ -131,6 +134,7 @@ export function buildJournal(opts: BuildJournalOpts): JournalObject {
     left ? COVER_T + (i + 0.5) * SHEET_T : stackTop - (i + 0.5) * SHEET_T;
   const sheets: THREE.Mesh[] = [];
   const sheetFaces: THREE.Mesh[] = [];
+  const sheetBacks: THREE.Mesh[] = [];
   const faceGeo = track(new THREE.PlaneGeometry(W * 0.985, H * 0.985));
   for (let i = 0; i < S; i++) {
     const m = new THREE.Mesh(slabGeo, [paperMat, edgeMat]);
@@ -157,6 +161,24 @@ export function buildJournal(opts: BuildJournalOpts): JournalObject {
     face.receiveShadow = false;
     m.add(face);
     sheetFaces.push(face);
+    // back face (page 2i — the page that looks at the reader once the sheet
+    // has been flipped onto the left pile)
+    const backMat = track(
+      new THREE.MeshStandardMaterial({
+        color: paperColor,
+        map: textures.getFlippedTexture(2 * i) ?? getPaperTexture(),
+        roughness: 0.92,
+        side: THREE.DoubleSide,
+      }),
+    );
+    const back = new THREE.Mesh(faceGeo, backMat);
+    back.rotation.x = -HALF_PI;
+    back.position.set(W / 2, -0.0006, 0);
+    back.visible = false;
+    back.castShadow = false;
+    back.receiveShadow = false;
+    m.add(back);
+    sheetBacks.push(back);
   }
 
   /* -------- front cover on a pivot at the spine -------- */
@@ -318,6 +340,7 @@ export function buildJournal(opts: BuildJournalOpts): JournalObject {
     leftWell,
     rightWell,
     sheetFaces,
+    sheetBacks,
     tapZoneL,
     tapZoneR,
     gutterShade,
