@@ -62,6 +62,8 @@ export interface JournalObject {
   sheetFaces: THREE.Mesh[];
   tapZoneL: THREE.Mesh;
   tapZoneR: THREE.Mesh;
+  /** soft static shading along the gutter (visible while reading) */
+  gutterShade: THREE.Mesh;
   flipShadow: THREE.Mesh;
   gutterShadow: THREE.Mesh;
   dispose(): void;
@@ -282,6 +284,23 @@ export function buildJournal(opts: BuildJournalOpts): JournalObject {
   gutterShadow.visible = false;
   offset.add(gutterShadow);
 
+  /* -------- static gutter shading (reading-view spine valley) -------- */
+  const gutterShade = new THREE.Mesh(
+    track(new THREE.PlaneGeometry(W * 0.22, H * 0.985)),
+    track(
+      new THREE.MeshBasicMaterial({
+        map: getGutterShadowTexture(),
+        transparent: true,
+        depthWrite: false,
+        opacity: 0.28,
+      }),
+    ),
+  );
+  gutterShade.rotation.x = -HALF_PI;
+  gutterShade.renderOrder = 28;
+  gutterShade.visible = false;
+  offset.add(gutterShade);
+
   const api: JournalObject = {
     root,
     stand,
@@ -301,6 +320,7 @@ export function buildJournal(opts: BuildJournalOpts): JournalObject {
     sheetFaces,
     tapZoneL,
     tapZoneR,
+    gutterShade,
     flipShadow,
     gutterShadow,
     dispose() {

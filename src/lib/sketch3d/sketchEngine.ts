@@ -64,6 +64,8 @@ export interface SketchEngineCallbacks {
   onEditPage(pageIndex: number): void;
   /** shelf <-> 3D grid overview mode toggled */
   onGridChange?(active: boolean): void;
+  /** shelf long-press drag-to-reorder committed (persist via API) */
+  onReorder?(id: string, toIndex: number): void;
   /** fullscreen page zoom started / fully exited */
   onZoomChange?(active: boolean): void;
   /** the camera finished zooming INTO the page (editor may open) */
@@ -105,6 +107,16 @@ interface PageZoomState {
   target: { pos: THREE.Vector3; look: THREE.Vector3; fov: number };
 }
 
+interface ReorderState {
+  active: boolean;
+  id: string;
+  startIndex: number;
+  currentIndex: number;
+  grabX: number; // pointer x at press
+  bookX: number; // book x at press
+  moved: boolean;
+}
+
 export class SketchEngine {
   private container: HTMLElement;
   private cb: SketchEngineCallbacks;
@@ -131,6 +143,11 @@ export class SketchEngine {
   private flip: FlipState = { active: false, dir: 1, from: 0, start: 0 };
   private spreadTween: SpreadTween = { active: false, from: 0, to: 0, start: 0 };
   private pageZoom: PageZoomState | null = null;
+  private reorder: ReorderState | null = null;
+  private reorderTimer: number | null = null;
+  /** open-mode horizontal drag (swipe-to-flip) */
+  private openDragX = 0;
+  private openDragActive = false;
   private static readonly TWEEN_DUR = 0.34;
   /** pose captured at openJournal: stand rotation + root height we transition from */
   private openStartStand = HALF_PI;
@@ -405,6 +422,11 @@ export class SketchEngine {
       this.pageZoom = null;
     }
     this.gridScroll = this.gridScrollTarget = 0;
+    this.reorder = null;
+    if (this.reorderTimer != null) {
+      window.clearTimeout(this.reorderTimer);
+      this.reorderTimer = null;
+    }
     this.camFov = 33;
     this.updateCameraFit();
     this.camPos.set(0, 1.06, 5.2);
@@ -751,6 +773,7 @@ export class SketchEngine {
   dispose(): void {
     this.disposed = true;
     cancelAnimationFrame(this.raf);
+    if (this.reorderTimer != null) window.clearTimeout(this.reorderTimer);
     this.unbindEvents();
     for (const id of [...this.journals.keys()]) this.removeJournal(id);
     for (const tex of this.pageTexCache.values()) tex.dispose();
@@ -851,6 +874,7 @@ export class SketchEngine {
     entry.obj.leftWell.visible = false;
     entry.obj.rightWell.visible = true;
     entry.obj.flipGroup.visible = false;
+    entry.obj.gutterShade.visible = false;
     for (const f of entry.obj.sheetFaces) f.visible = false;
     // restore the spine column (it flattens while the book is open)
     entry.obj.spine.scale.y = 1;
@@ -974,6 +998,11 @@ export class SketchEngine {
     obj.rightWell.position.y = COVER_T + 0.0009;
     obj.rightWell.visible = true;
     obj.leftWell.visible = false;
+
+    // static gutter shading sits just above the content planes
+    const gutterMidY = (leftTopY + rightTopY) / 2 + SHEET_T * 0.5 + 0.0016;
+    obj.gutterShade.position.set(0, gutterMidY, 0);
+    obj.gutterShade.visible = show;
 
     // front cover open, resting flat on the left at the bottom of the block
     obj.coverPivot.rotation.z = Math.PI;
@@ -1394,14 +1423,44 @@ export class SketchEngine {
     this.raf = requestAnimationFrame(this.loop);
     const now = this.clock.getElapsedTime();
 
-    // shelf scroll easing + sway
+    // shelf scroll easing + sway (reorder takes over the dragged book)
     if (this.mode === 'shelf') {
       this.scroll = lerp(this.scroll, this.scrollTarget, 0.14);
+      // while reordering, remaining books fill the slots around the dragged
+      // book's hover index so a gap opens under it
+      const slots = this.order.map(() => -1);
+      const reorder = this.reorder;
+      if (reorder?.active) {
+        let free = 0;
+        this.order.forEach((id, j) => {
+          if (id === reorder.id) return;
+          while (free === reorder.currentIndex) free += 1;
+          slots[j] = free;
+          free += 1;
+        });
+      }
       this.order.forEach((id, i) => {
         const entry = this.journals.get(id);
         if (!entry) return;
-        const fromCenter = i - this.scroll;
+        const dragging = this.reorder?.active && this.reorder.id === id;
+        const fromCenter = dragging
+          ? this.reorder!.bookX
+          : (this.reorder?.active ? slots[i] : i) - this.scroll;
         const root = entry.obj.root;
+        if (dragging && this.reorder) {
+          // lifted, slightly enlarged, gently wobbling — follows the pointer
+          root.position.x = lerp(root.position.x, this.reorder.bookX, 0.35);
+          root.position.z = lerp(root.position.z, 0.85, 0.2);
+          root.position.y = lerp(root.position.y, SHELF_BASE_Y + 0.42, 0.2);
+          root.rotation.y = lerp(root.rotation.y, Math.sin(now * 6) * 0.06, 0.2);
+          root.rotation.z = lerp(root.rotation.z, -0.04, 0.2);
+          root.scale.setScalar(lerp(root.scale.x, 1.1, 0.2));
+          entry.blob.position.set(root.position.x, 0.004, root.position.z + 0.05);
+          entry.blob.scale.set(1.8, 2.0, 1);
+          const bm = entry.blob.material as THREE.MeshBasicMaterial;
+          bm.opacity = lerp(bm.opacity, 0.6, 0.2);
+          return;
+        }
         root.position.x = fromCenter * SHELF_SPACING;
         root.position.z = -Math.min(0.55, Math.abs(fromCenter) * 0.22);
         const sway = Math.sin(now * 0.7 + i * 2.1) * 0.02;
@@ -1409,6 +1468,7 @@ export class SketchEngine {
         const isSelected = id === this.selectedId;
         const targetY = SHELF_BASE_Y + (isSelected ? SELECT_LIFT : 0);
         root.position.y = lerp(root.position.y, targetY, 0.14);
+        root.scale.setScalar(lerp(root.scale.x, 1, 0.14));
         // recover from any lingering grid pose (flat book → stand back up)
         entry.obj.stand.rotation.x = lerp(entry.obj.stand.rotation.x, HALF_PI, 0.14);
         entry.obj.root.rotation.z = lerp(entry.obj.root.rotation.z, 0, 0.14);
@@ -1419,6 +1479,7 @@ export class SketchEngine {
           sp.position.y = lerp(sp.position.y, sp.userData.baseY as number, 0.14);
         }
         entry.blob.position.set(root.position.x, 0.004, root.position.z + 0.05);
+        entry.blob.scale.set(1.5, 1.7, 1);
         const blobMat = entry.blob.material as THREE.MeshBasicMaterial;
         blobMat.opacity = lerp(blobMat.opacity, isSelected ? 0.55 : 0.34, 0.14);
       });
@@ -1433,11 +1494,17 @@ export class SketchEngine {
       } else {
         if (this.spreadTween.active) this.updateSpreadTween();
         this.updateFlip(now);
-        // gentle idle float of the open book
+        // gentle idle float of the open book + swipe-to-flip lean feedback
         const entry = this.openEntry;
-        if (entry && !this.flip.active) {
-          entry.obj.root.position.y = Math.sin(now * 0.8) * 0.008;
-          entry.obj.root.rotation.z = Math.sin(now * 0.5) * 0.004;
+        if (entry && !this.flip.active && !this.spreadTween.active) {
+          const lean = this.openDragActive
+            ? Math.max(-0.07, Math.min(0.07, -this.openDragX * 0.0007))
+            : 0;
+          entry.obj.offset.rotation.y = lerp(entry.obj.offset.rotation.y, lean, 0.25);
+          if (!this.openDragActive) {
+            entry.obj.root.position.y = Math.sin(now * 0.8) * 0.008;
+            entry.obj.root.rotation.z = Math.sin(now * 0.5) * 0.004;
+          }
         }
       }
     } else if (this.mode === 'closing') {
@@ -1530,6 +1597,35 @@ export class SketchEngine {
     } catch {
       // synthetic pointers / stale pointer ids can throw NotFoundError — safe to ignore
     }
+    // open mode: arm swipe-to-flip
+    if (this.mode === 'open' && !this.flip.active && !this.spreadTween.active && !this.pageZoom?.active) {
+      this.openDragActive = true;
+      this.openDragX = 0;
+    }
+    // shelf: long-press arms drag-to-reorder
+    if (this.mode === 'shelf' && !this.reorder?.active && this.selectedId) {
+      const hit = this.pickJournal(e);
+      if (hit === this.selectedId) {
+        const idx = this.order.indexOf(hit);
+        if (idx >= 0) {
+          if (this.reorderTimer != null) window.clearTimeout(this.reorderTimer);
+          this.reorderTimer = window.setTimeout(() => {
+            if (this.mode === 'shelf' && this.dragging && this.dragMoved <= 7) {
+              this.reorder = {
+                active: true,
+                id: hit,
+                startIndex: idx,
+                currentIndex: idx,
+                grabX: this.dragLastX,
+                bookX: (idx - this.scroll) * SHELF_SPACING,
+                moved: false,
+              };
+              playTap();
+            }
+          }, 480);
+        }
+      }
+    }
   };
 
   private onPointerMove = (e: PointerEvent): void => {
@@ -1546,6 +1642,17 @@ export class SketchEngine {
     this.dragLastX = e.clientX;
     this.dragLastY = e.clientY;
     this.dragMoved += Math.abs(dx) + Math.abs(dy);
+    if (this.reorder?.active) {
+      // drag the lifted book; its slot follows the pointer position
+      const r = this.reorder;
+      r.bookX += dx * 0.011;
+      r.moved = true;
+      r.currentIndex = Math.max(
+        0,
+        Math.min(this.order.length - 1, Math.round(r.bookX / SHELF_SPACING + this.scroll)),
+      );
+      return;
+    }
     if (this.mode === 'shelf') {
       this.scrollTarget = this.scrollTarget - dx * 0.011;
       this.scrollTarget = Math.max(-0.35, Math.min(this.order.length - 1 + 0.35, this.scrollTarget));
@@ -1555,6 +1662,8 @@ export class SketchEngine {
       this.gridScrollTarget += dy * 0.006;
       const maxScroll = Math.max(0, this.gridRows() - 1);
       this.gridScrollTarget = Math.max(0, Math.min(maxScroll, this.gridScrollTarget));
+    } else if (this.mode === 'open' && this.openDragActive) {
+      this.openDragX += dx;
     }
   };
 
@@ -1564,6 +1673,27 @@ export class SketchEngine {
     const wasDrag = this.dragMoved > 7;
     const info = this.pointerDownInfo;
     this.pointerDownInfo = null;
+    if (this.reorderTimer != null) {
+      window.clearTimeout(this.reorderTimer);
+      this.reorderTimer = null;
+    }
+    // commit / cancel shelf drag-to-reorder
+    if (this.reorder?.active) {
+      const r = this.reorder;
+      this.reorder = null;
+      if (r.currentIndex !== r.startIndex) {
+        // persist the new order: move id from startIndex to currentIndex
+        const ids = this.order.filter((x) => x !== r.id);
+        ids.splice(r.currentIndex, 0, r.id);
+        this.order = ids;
+        this.scrollTarget = Math.max(0, Math.min(this.order.length - 1, r.currentIndex));
+        this.selectedId = r.id;
+        this.layoutAll();
+        this.cb.onReorder?.(r.id, r.currentIndex);
+        playTap();
+      }
+      return;
+    }
     if (this.mode === 'shelf') {
       // snap to nearest
       this.scrollTarget = Math.max(0, Math.min(this.order.length - 1, Math.round(this.scrollTarget)));
@@ -1573,6 +1703,17 @@ export class SketchEngine {
         this.cb.onJournalSelect(newSel);
         playTap();
       }
+    }
+    // open mode: horizontal swipe flips pages
+    if (this.mode === 'open' && this.openDragActive) {
+      this.openDragActive = false;
+      if (wasDrag && Math.abs(this.openDragX) > 45 && !this.flip.active && !this.spreadTween.active) {
+        const dir: 1 | -1 = this.openDragX < 0 ? 1 : -1;
+        if (!this.flipPage(dir)) playTap();
+        this.openDragX = 0;
+        return;
+      }
+      this.openDragX = 0;
     }
     if ((this.mode === 'shelf' || this.mode === 'grid') && !wasDrag && info) {
       const hit = this.pickJournal(e);

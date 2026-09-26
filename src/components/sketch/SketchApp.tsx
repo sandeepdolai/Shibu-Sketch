@@ -22,7 +22,7 @@ import { parsePageContent } from '@/lib/sketch/types';
 import { SketchEngine } from '@/lib/sketch3d/sketchEngine';
 import { contentToDataURL, spreadToDataURL } from '@/lib/sketch/render';
 import { isSfxMuted, playTap, setSfxMuted } from '@/lib/sketch3d/sfx';
-import { SlidersHorizontal } from 'lucide-react';
+import { Plus, SlidersHorizontal } from 'lucide-react';
 import { useSketchToast } from './Toasts';
 import { TitleBlock, PageDots } from './chrome';
 import { ShelfTopBar, OpenTopBar } from './TopBars';
@@ -250,6 +250,9 @@ export default function SketchApp() {
         if (page) setEditTarget({ pageId: page.id, pageIndex, content: page.content });
       },
       onGridChange: (active) => setGrid3d(active),
+      onReorder: (id, toIndex) => {
+        reorderRef.current?.(id, toIndex);
+      },
     });
     engineRef.current = engine;
     setGrid3d(false); // a fresh engine always starts on the shelf (HMR-safe)
@@ -307,6 +310,36 @@ export default function SketchApp() {
     engineRef.current?.closeJournal();
     playTap();
   }, [view]);
+
+  /** persist a shelf drag-to-reorder result */
+  const reorderJournal = useCallback(
+    async (id: string, toIndex: number) => {
+      const current = journalsRef.current;
+      const ids = current.map((j) => j.id).filter((x) => x !== id);
+      ids.splice(toIndex, 0, id);
+      // optimistic local update
+      const byId = new Map(current.map((j) => [j.id, j]));
+      const ordered = ids.map((x) => byId.get(x)).filter(Boolean) as JournalDTO[];
+      setJournals(ordered);
+      engineRef.current?.setJournals(ordered);
+      if (selectedRef.current) engineRef.current?.selectJournal(selectedRef.current);
+      try {
+        const res = await fetch('/api/sketch/journals/reorder', {
+          method: 'PATCH',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ ids }),
+        });
+        if (!res.ok) throw new Error();
+        toast('Shelf reordered');
+      } catch {
+        toast('Could not reorder', 'destructive');
+        void refreshJournals();
+      }
+    },
+    [toast, refreshJournals],
+  );
+  const reorderRef = useRef<(id: string, toIndex: number) => void>(null);
+  reorderRef.current = reorderJournal;
 
   const savePage = useCallback(
     async (content: PageContent) => {
@@ -942,6 +975,23 @@ export default function SketchApp() {
         >
           Tap a page center to draw · edges to flip
         </button>
+      )}
+
+      {/* grid overview affordance: swipe tips + New journal */}
+      {grid3d && view === 'shelf' && (
+        <div className="pointer-events-none absolute inset-x-0 bottom-24 z-30 flex flex-col items-center gap-2 md:bottom-28">
+          <span className="rounded-full bg-black/30 px-4 py-1.5 text-[11px] font-medium text-white/85 backdrop-blur-sm">
+            Drag up to see more · tap a journal to open
+          </span>
+          <button
+            type="button"
+            className="pointer-events-auto flex items-center gap-1.5 rounded-full bg-white/95 px-4 py-2 text-xs font-semibold text-zinc-800 shadow-lg transition hover:bg-white"
+            onClick={() => setNewOpen(true)}
+          >
+            <Plus className="h-4 w-4" />
+            New journal
+          </button>
+        </div>
       )}
 
       {/* bottom dock (fades out while a page is zoomed fullscreen) */}

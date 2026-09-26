@@ -129,6 +129,11 @@ export const savePageSchema = z.object({
   content: pageContentSchema,
 });
 
+/** Shelf drag-to-reorder: the complete ordered list of journal ids. */
+export const reorderSchema = z.object({
+  ids: z.array(z.string().min(1)).min(1, 'ids required').max(200, 'too many ids (max 200)'),
+});
+
 /** First human-readable zod issue, for error responses. */
 export function zodErrorMessage(error: z.ZodError): string {
   return error.issues[0]?.message ?? 'invalid request body';
