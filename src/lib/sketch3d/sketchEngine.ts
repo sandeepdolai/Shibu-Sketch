@@ -1,0 +1,1106 @@
+/**
+ * Shibu-Sketch — three.js scene engine.
+ *
+ * Owns the renderer, cameras, lights, the shelf of journals, and every 3D
+ * animation: shelf browsing (drag/swipe + sway), the journal-select lift,
+ * the blossom→lay-flat OPEN transition, page flips with real paper curl,
+ * the closing transition, tap/click picking, tilt parallax and scrubbing.
+ *
+ * React (SketchApp) drives it through a small imperative API and receives
+ * intents via callbacks. The engine never touches React state directly.
+ */
+import * as THREE from 'three';
+import {
+  JOURNAL_H,
+  JOURNAL_W,
+  COVER_T,
+  SHEET_T,
+  buildJournal,
+  journalDims,
+  applyPageTexture,
+  type JournalObject,
+  type PageTextureProvider,
+} from './journalObject';
+import { bendSheet } from './sheetGeom';
+import { getShadowBlobTexture, makeCoverTexture } from './art';
+import { renderPageContentToCanvas } from '@/lib/sketch/render';
+import type { JournalDTO, JournalDetailDTO, PageContent } from '@/lib/sketch/types';
+import { parsePageContent } from '@/lib/sketch/types';
+import { playFlip, playTap } from './sfx';
+
+const HALF_PI = Math.PI / 2;
+const SHELF_SPACING = 1.16;
+const SHELF_BASE_Y = JOURNAL_H / 2 + 0.02;
+const SELECT_LIFT = 0.13;
+const OPEN_DUR = 1.3;
+const CLOSE_DUR = 0.95;
+const FLIP_DUR = 0.5;
+const SELECT_DUR = 0.45;
+
+const easeInOut = (t: number): number => t * t * (3 - 2 * t);
+const easeOut = (t: number): number => 1 - (1 - t) * (1 - t);
+const clamp01 = (t: number): number => Math.min(1, Math.max(0, t));
+const lerp = (a: number, b: number, t: number): number => a + (b - a) * t;
+
+export interface SketchEngineCallbacks {
+  /** tapped the already-selected journal -> app opens it */
+  onJournalTap(id: string): void;
+  /** tapped a non-selected journal -> app updates selection */
+  onJournalSelect(id: string): void;
+  onOpenComplete(): void;
+  onCloseComplete(): void;
+  /** spread changed (after flip/scrub); spread is 0-based */
+  onSpreadChange(spread: number): void;
+  /** double-click / center tap on a page in open view -> edit request */
+  onEditPage(pageIndex: number): void;
+}
+
+interface ShelfEntry {
+  dto: JournalDTO;
+  obj: JournalObject;
+  coverMat: THREE.MeshPhysicalMaterial;
+  coverArtMat: THREE.MeshPhysicalMaterial;
+  blob: THREE.Mesh;
+}
+
+type Mode = 'shelf' | 'opening' | 'open' | 'closing';
+
+interface FlipState {
+  active: boolean;
+  dir: 1 | -1;
+  from: number; // spread we flip from
+  start: number; // seconds
+}
+
+export class SketchEngine {
+  private container: HTMLElement;
+  private cb: SketchEngineCallbacks;
+  private renderer: THREE.WebGLRenderer;
+  private scene: THREE.Scene;
+  private camera: THREE.PerspectiveCamera;
+  private raycaster = new THREE.Raycaster();
+  private clock = new THREE.Clock();
+  private raf = 0;
+  private disposed = false;
+
+  private journals = new Map<string, ShelfEntry>();
+  private order: string[] = [];
+
+  private mode: Mode = 'shelf';
+  private selectedId: string | null = null;
+  private openEntry: ShelfEntry | null = null;
+  private pageCount = 0;
+  private spread = 0;
+  private transitionStart = 0;
+  private flip: FlipState = { active: false, dir: 1, from: 0, start: 0 };
+
+  /* shelf scroll */
+  private scroll = 0; // float index
+  private scrollTarget = 0;
+  private dragging = false;
+  private dragStartX = 0;
+  private dragLastX = 0;
+  private dragMoved = 0;
+  private dragVelocity = 0;
+
+  /* tilt parallax */
+  private tiltX = 0;
+  private tiltY = 0;
+  private tiltTargetX = 0;
+  private tiltTargetY = 0;
+  private tiltEnabled = true;
+
+  /* page textures */
+  private pageTexCache = new Map<string, THREE.CanvasTexture>();
+  private pagesData: Array<{ id: string; content: PageContent }> = [];
+  private paperColor = '#faf8f4';
+
+  /* light */
+  private sun: THREE.DirectionalLight;
+
+  /* transient cam */
+  private camPos = new THREE.Vector3(0, 1.06, 5.2);
+  private camLook = new THREE.Vector3(0, 0.7, 0);
+  private camFov = 33;
+
+  private pointerDownInfo: { x: number; y: number; t: number; id: string } | null = null;
+  private lastTapTime = 0;
+  private lastTapTarget: string | null = null;
+
+  private textures: PageTextureProvider;
+
+  constructor(container: HTMLElement, cb: SketchEngineCallbacks) {
+    this.container = container;
+    this.cb = cb;
+
+    this.renderer = new THREE.WebGLRenderer({ antialias: true, alpha: true });
+    this.renderer.setPixelRatio(Math.min(window.devicePixelRatio || 1, 2));
+    this.renderer.shadowMap.enabled = true;
+    this.renderer.shadowMap.type = THREE.PCFSoftShadowMap;
+    this.renderer.outputColorSpace = THREE.SRGBColorSpace;
+    container.appendChild(this.renderer.domElement);
+    this.renderer.domElement.style.display = 'block';
+    this.renderer.domElement.style.touchAction = 'pan-y';
+
+    this.scene = new THREE.Scene();
+    this.camera = new THREE.PerspectiveCamera(33, 1, 0.05, 60);
+    this.camera.position.copy(this.camPos);
+
+    const hemi = new THREE.HemisphereLight(0xffffff, 0x8a87a0, 1.05);
+    this.scene.add(hemi);
+    this.sun = new THREE.DirectionalLight(0xffffff, 1.5);
+    this.sun.position.set(-2.4, 4.2, 3.2);
+    this.sun.castShadow = true;
+    this.sun.shadow.mapSize.set(1024, 1024);
+    this.sun.shadow.camera.left = -4;
+    this.sun.shadow.camera.right = 4;
+    this.sun.shadow.camera.top = 4;
+    this.sun.shadow.camera.bottom = -2;
+    this.sun.shadow.camera.far = 14;
+    this.sun.shadow.radius = 5;
+    this.scene.add(this.sun);
+    const rim = new THREE.DirectionalLight(0xfff3e0, 0.5);
+    rim.position.set(2.5, 2.0, -1.5);
+    this.scene.add(rim);
+
+    // shadow-catcher floor
+    const floorMat = new THREE.ShadowMaterial({ opacity: 0.22 });
+    const floor = new THREE.Mesh(new THREE.PlaneGeometry(30, 20), floorMat);
+    floor.rotation.x = -HALF_PI;
+    floor.position.y = 0;
+    floor.receiveShadow = true;
+    this.scene.add(floor);
+
+    this.textures = {
+      getPageTexture: (idx) => this.pageTexture(idx, 'right'),
+      getLeftTexture: (idx) => this.pageTexture(idx, 'left'),
+      getFlippedTexture: (idx) => this.pageTexture(idx, 'flip'),
+    };
+
+    this.bindEvents();
+    this.resize();
+    this.loop();
+    if (typeof window !== 'undefined') {
+      (window as unknown as { __sketchEngine?: SketchEngine }).__sketchEngine = this;
+    }
+  }
+
+  /* ================================================================ */
+  /* public API                                                        */
+  /* ================================================================ */
+
+  setJournals(list: JournalDTO[]): void {
+    const keep = new Set(list.map((j) => j.id));
+    for (const id of [...this.journals.keys()]) {
+      if (!keep.has(id)) this.removeJournal(id);
+    }
+    this.order = list.map((j) => j.id);
+    list.forEach((dto, i) => {
+      const existing = this.journals.get(dto.id);
+      if (existing) {
+        existing.dto = dto;
+        this.layoutJournal(existing, i);
+      } else {
+        this.addJournal(dto, i);
+      }
+    });
+    // clamp scroll
+    this.scrollTarget = Math.min(this.scrollTarget, Math.max(0, list.length - 1));
+    this.scroll = this.scrollTarget;
+  }
+
+  selectJournal(id: string | null): void {
+    if (this.selectedId === id) return;
+    this.selectedId = id;
+    this.scrollTarget = id ? Math.max(0, this.order.indexOf(id)) : this.scrollTarget;
+  }
+
+  getSelectedId(): string | null {
+    return this.selectedId;
+  }
+
+  /** Begin the open transition for a journal (must already be selected). */
+  openJournal(detail: JournalDetailDTO, startSpread: number): void {
+    if (this.mode !== 'shelf') return;
+    const entry = this.journals.get(detail.id);
+    if (!entry) return;
+    this.openEntry = entry;
+    this.pageCount = detail.pages.length;
+    this.pagesData = detail.pages.map((p) => ({ id: p.id, content: p.content }));
+    this.paperColor = detail.paperColor || '#faf8f4';
+    this.spread = Math.max(0, Math.min(startSpread, this.spreadCount() - 1));
+    this.mode = 'opening';
+    this.transitionStart = this.clock.getElapsedTime();
+  }
+
+  closeJournal(): void {
+    if (this.mode !== 'open') return;
+    this.mode = 'closing';
+    this.transitionStart = this.clock.getElapsedTime();
+    this.flip.active = false;
+    if (this.openEntry) this.openEntry.obj.flipGroup.visible = false;
+  }
+
+  /** Rebuild the currently-open journal in place (e.g. after pages were added). */
+  reloadOpenJournal(detail: JournalDetailDTO): void {
+    if (this.mode !== 'open' || !this.openEntry) return;
+    const keepSpread = this.spread;
+    const oldId = this.openEntry.dto.id;
+    this.removeJournal(oldId);
+    const idx = Math.max(0, this.order.indexOf(oldId));
+    this.order = this.order.map((id) => (id === oldId ? detail.id : id));
+    this.addJournal({ ...detail, pageCount: detail.pages.length }, idx);
+    const entry = this.journals.get(detail.id);
+    if (!entry) return;
+    this.openEntry = entry;
+    this.pageCount = detail.pages.length;
+    this.pagesData = detail.pages.map((p) => ({ id: p.id, content: p.content }));
+    this.paperColor = detail.paperColor || '#faf8f4';
+    this.spread = Math.max(0, Math.min(keepSpread, this.spreadCount() - 1));
+    // pose directly in open state
+    entry.obj.stand.rotation.x = 0;
+    entry.obj.root.position.set(0, 0, 0);
+    entry.obj.root.rotation.set(0, 0, 0);
+    entry.obj.root.scale.setScalar(1);
+    entry.blob.visible = false;
+    this.layoutOpenSpread(this.spread, true);
+  }
+
+  /** Immediately return to shelf mode (e.g. the open journal was deleted). */
+  forceShelf(): void {
+    this.mode = 'shelf';
+    this.openEntry = null;
+    this.flip.active = false;
+    this.camFov = 33;
+    this.updateCameraFit();
+    this.camPos.set(0, 1.06, 5.2);
+    this.camPos.y = 1.02;
+    this.camPos.x = 0;
+    this.camLook.set(0, 0.7, 0);
+    this.layoutAll();
+    for (const [, j] of this.journals) {
+      j.obj.root.visible = true;
+      j.blob.visible = true;
+      (j.blob.material as THREE.MeshBasicMaterial).opacity = 0.38;
+    }
+  }
+
+  /** After a close/forceShelf, hide the open book's leftover pose. */
+  markClosedSpread(spread: number): void {
+    this.spread = Math.max(0, spread);
+  }
+
+  /** Current spread index (open mode). */
+  getSpread(): number {
+    return this.spread;
+  }
+
+  spreadCount(): number {
+    return Math.max(1, Math.ceil(this.pageCount / 2));
+  }
+
+  /** Flip one page. Returns false if impossible (edge / busy). */
+  flipPage(dir: 1 | -1): boolean {
+    if (this.mode !== 'open' || this.flip.active) return false;
+    const to = this.spread + dir;
+    if (to < 0 || to >= this.spreadCount()) return false;
+    this.flip = { active: true, dir, from: this.spread, start: this.clock.getElapsedTime() };
+    this.prepareFlipSheet(this.spread, dir);
+    if (dir === 1) {
+      // flying sheet k leaves the right stack; left stack grows after it lands
+      this.layoutStaticSheets(this.spread, this.spread + 1, this.spread);
+    } else {
+      // flying sheet (k-1) leaves the left stack
+      this.layoutStaticSheets(this.spread - 1, this.spread, this.spread - 1);
+    }
+    playFlip();
+    return true;
+  }
+
+  /** Jump directly to a spread (scrubber). */
+  setSpread(k: number): void {
+    if (this.mode !== 'open' || this.flip.active) return;
+    const nk = Math.max(0, Math.min(k, this.spreadCount() - 1));
+    if (nk === this.spread) return;
+    this.spread = nk;
+    this.layoutOpenSpread(nk, false);
+    this.cb.onSpreadChange(nk);
+  }
+
+  /** Update a page's content after editing and refresh its textures. */
+  updatePageContent(pageId: string, content: PageContent): void {
+    const pd = this.pagesData.find((p) => p.id === pageId);
+    if (pd) pd.content = content;
+    for (const [key, tex] of [...this.pageTexCache.entries()]) {
+      if (key.startsWith(`${pageId}:`)) {
+        tex.dispose();
+        this.pageTexCache.delete(key);
+      }
+    }
+    if (this.mode === 'open' && this.openEntry) {
+      this.layoutOpenSpread(this.spread, true);
+    }
+  }
+
+  setTiltEnabled(v: boolean): void {
+    this.tiltEnabled = v;
+  }
+
+  resize(): void {
+    const w = this.container.clientWidth || 1;
+    const h = this.container.clientHeight || 1;
+    this.renderer.setSize(w, h, false);
+    this.camera.aspect = w / h;
+    this.updateCameraFit();
+    this.camera.updateProjectionMatrix();
+  }
+
+  dispose(): void {
+    this.disposed = true;
+    cancelAnimationFrame(this.raf);
+    this.unbindEvents();
+    for (const id of [...this.journals.keys()]) this.removeJournal(id);
+    for (const tex of this.pageTexCache.values()) tex.dispose();
+    this.pageTexCache.clear();
+    this.renderer.dispose();
+    this.renderer.domElement.remove();
+  }
+
+  /* ================================================================ */
+  /* journals                                                          */
+  /* ================================================================ */
+
+  private addJournal(dto: JournalDTO, index: number): void {
+    const coverMat = new THREE.MeshPhysicalMaterial({
+      color: dto.coverStyle.color,
+      roughness: 0.62,
+      clearcoat: 0.25,
+      clearcoatRoughness: 0.5,
+    });
+    const coverArtMat = new THREE.MeshPhysicalMaterial({
+      color: 0xffffff,
+      roughness: 0.55,
+      clearcoat: 0.3,
+      clearcoatRoughness: 0.45,
+    });
+    const artTex = makeCoverTexture(dto.coverStyle);
+    coverArtMat.map = artTex;
+    coverArtMat.needsUpdate = true;
+
+    const obj = buildJournal({
+      pageCount: Math.max(2, dto.pageCount),
+      coverMaterial: coverMat,
+      coverArtTexture: artTex,
+      coverArtMaterial: coverArtMat,
+      paperColor: dto.paperColor || '#faf8f4',
+      textures: this.textures,
+    });
+    obj.root.traverse((o) => {
+      o.userData.journalId = dto.id;
+    });
+
+    const blob = new THREE.Mesh(
+      new THREE.PlaneGeometry(1, 1),
+      new THREE.MeshBasicMaterial({
+        map: getShadowBlobTexture(),
+        transparent: true,
+        depthWrite: false,
+        opacity: 0.5,
+      }),
+    );
+    blob.rotation.x = -HALF_PI;
+    blob.scale.set(1.5, 1.7, 1);
+    this.scene.add(blob);
+
+    const entry: ShelfEntry = { dto, obj, coverMat, coverArtMat, blob };
+    this.journals.set(dto.id, entry);
+    this.scene.add(obj.root);
+    this.layoutJournal(entry, index);
+  }
+
+  private removeJournal(id: string): void {
+    const entry = this.journals.get(id);
+    if (!entry) return;
+    this.scene.remove(entry.obj.root);
+    this.scene.remove(entry.blob);
+    (entry.blob.material as THREE.Material).dispose();
+    entry.blob.geometry.dispose();
+    entry.coverArtMat.map?.dispose();
+    entry.coverMat.dispose();
+    entry.coverArtMat.dispose();
+    entry.obj.dispose();
+    this.journals.delete(id);
+  }
+
+  private layoutJournal(entry: ShelfEntry, index: number): void {
+    const fromCenter = index - this.scroll;
+    const root = entry.obj.root;
+    root.position.x = fromCenter * SHELF_SPACING;
+    root.position.z = -Math.min(0.55, Math.abs(fromCenter) * 0.22);
+    root.rotation.y = Math.max(-0.4, Math.min(0.4, -fromCenter * 0.16));
+    const isSelected = entry.dto.id === this.selectedId;
+    root.position.y = SHELF_BASE_Y + (isSelected && this.mode === 'shelf' ? SELECT_LIFT : 0);
+    if (this.mode === 'shelf') root.scale.setScalar(1);
+    entry.blob.visible = true;
+    entry.blob.position.set(root.position.x, 0.004, root.position.z + 0.05);
+    const s = root.scale.x;
+    entry.blob.scale.set(1.5 * s, 1.7 * s, 1);
+    (entry.blob.material as THREE.MeshBasicMaterial).opacity =
+      (isSelected ? 0.55 : 0.38) * s;
+    entry.obj.stand.rotation.x = HALF_PI;
+    entry.obj.stand.position.y = 0;
+    entry.obj.coverPivot.rotation.z = 0;
+    entry.obj.offset.rotation.y = 0;
+    // hide everything that belongs to the open pose
+    entry.obj.leftContent.visible = false;
+    entry.obj.rightContent.visible = false;
+    entry.obj.leftWell.visible = false;
+    entry.obj.rightWell.visible = true;
+    entry.obj.flipGroup.visible = false;
+    // restore the spine column (it flattens while the book is open)
+    entry.obj.spine.scale.y = 1;
+    if (entry.obj.spine.userData.baseY != null) {
+      entry.obj.spine.position.y = entry.obj.spine.userData.baseY as number;
+    }
+    if (entry.obj.coverPivot.userData.closedY == null) {
+      entry.obj.coverPivot.userData.closedY = entry.obj.coverPivot.position.y;
+    } else {
+      entry.obj.coverPivot.position.y = entry.obj.coverPivot.userData.closedY as number;
+    }
+  }
+
+  /* ================================================================ */
+  /* open / close choreography                                         */
+  /* ================================================================ */
+
+  private pageTexture(
+    pageIndex: number,
+    variant: 'right' | 'left' | 'flip',
+  ): THREE.CanvasTexture | null {
+    if (pageIndex < 0 || pageIndex >= this.pagesData.length) return null;
+    const pd = this.pagesData[pageIndex];
+    const key = `${pd.id}:${variant}`;
+    let tex = this.pageTexCache.get(key);
+    if (tex) return tex;
+    const content = pd.content ?? parsePageContent('{}');
+    const canvas = renderPageContentToCanvas(content, 620, 868, this.paperColor);
+    tex = new THREE.CanvasTexture(canvas);
+    tex.colorSpace = THREE.SRGBColorSpace;
+    tex.anisotropy = 4;
+    if (variant === 'left') {
+      tex.flipY = false; // left geometry is Y-mirrored
+    } else if (variant === 'flip') {
+      tex.center.set(0.5, 0.5);
+      tex.rotation = Math.PI;
+    }
+    this.pageTexCache.set(key, tex);
+    return tex;
+  }
+
+  /** Open-pose camera target (pulls back on narrow screens). */
+  private openCamTarget(): { pos: THREE.Vector3; look: THREE.Vector3; fov: number } {
+    const aspect = this.camera.aspect || 1;
+    const extra = Math.max(0, (1.35 - aspect)) * 1.7;
+    return {
+      pos: new THREE.Vector3(0, 1.95 + extra * 0.35, 2.25 + extra),
+      look: new THREE.Vector3(0, 0.03, 0),
+      fov: 36 + Math.min(6, extra * 3),
+    };
+  }
+
+  /** Fan angle for a sheet `depth` steps below its stack's top sheet. */
+  private fanAngle(depth: number): number {
+    return Math.min(0.9, 0.28 + Math.max(0, depth - 1) * 0.075);
+  }
+
+  /** Lay out stacks + content planes for a spread. */
+  private layoutOpenSpread(k: number, _instant: boolean): void {
+    const entry = this.openEntry;
+    if (!entry) return;
+    const obj = entry.obj;
+    const { sheets: S } = journalDims(this.pageCount);
+
+    // sheets: left pile 0..k-1 (re-piled on the opened cover), right stack k..S-1
+    const stackTop = COVER_T + S * SHEET_T;
+    for (let i = 0; i < S; i++) {
+      const mesh = obj.sheets[i];
+      mesh.visible = true;
+      if (i < k) {
+        const depth = k - 1 - i; // 0 = top of the left pile
+        mesh.position.set(0, COVER_T + (i + 0.5) * SHEET_T, 0);
+        mesh.rotation.z = depth === 0 ? Math.PI : Math.PI - this.fanAngle(depth);
+      } else {
+        const depth = i - k; // 0 = top of the right stack
+        mesh.position.set(0, stackTop - (i + 0.5) * SHEET_T, 0);
+        mesh.rotation.z = depth === 0 ? 0 : -this.fanAngle(depth);
+      }
+    }
+    // center the open spread on the spine
+    obj.offset.position.x = 0;
+
+    // content planes (only revealed in open mode; hidden while closed/opening)
+    const leftIdx = 2 * k;
+    const rightIdx = 2 * k + 1;
+    // tops: sheet slab spans [slot, slot + t] -> top = slot + t = stackTop - k*t + t/2 (right)
+    const leftTopY = COVER_T + k * SHEET_T + SHEET_T / 2; // top of the left pile (sheet k-1)
+    const rightTopY = stackTop - k * SHEET_T + SHEET_T / 2; // top of the right stack (sheet k)
+    const show = this.mode === 'open';
+    obj.leftContent.rotation.z = 0; // left geometry already spans -W..0
+    obj.leftContent.position.y = leftTopY + 0.0012;
+    applyPageTexture(obj.leftContent, leftIdx, this.textures, this.paperColor, 'left');
+    obj.leftContent.visible = show && k > 0 && leftIdx < this.pageCount;
+    obj.rightContent.rotation.z = 0;
+    obj.rightContent.position.y = rightTopY + 0.0012;
+    applyPageTexture(obj.rightContent, rightIdx, this.textures, this.paperColor);
+    obj.rightContent.visible = show && rightIdx < this.pageCount;
+
+    // wells (paper liner over the covers' inner faces)
+    obj.rightWell.rotation.z = 0;
+    obj.rightWell.position.y = COVER_T + 0.0009;
+    obj.rightWell.visible = true;
+    obj.leftWell.visible = false;
+
+    // front cover open, resting flat on the left at the bottom of the block
+    obj.coverPivot.rotation.z = Math.PI;
+    obj.coverPivot.position.y = COVER_T / 2 + 0.0006;
+  }
+
+  /** Lay out the static sheet stacks while a sheet is flying. */
+  private layoutStaticSheets(leftCount: number, rightFrom: number, flyingIdx: number): void {
+    const entry = this.openEntry;
+    if (!entry) return;
+    const obj = entry.obj;
+    const { sheets: S } = journalDims(this.pageCount);
+    const stackTop = COVER_T + S * SHEET_T;
+    for (let i = 0; i < S; i++) {
+      const mesh = obj.sheets[i];
+      if (i === flyingIdx) {
+        mesh.visible = false;
+      } else if (i < leftCount) {
+        mesh.visible = true;
+        const depth = leftCount - 1 - i;
+        mesh.position.set(0, COVER_T + (i + 0.5) * SHEET_T, 0);
+        mesh.rotation.z = depth === 0 ? Math.PI : Math.PI - this.fanAngle(depth);
+      } else if (i >= rightFrom) {
+        mesh.visible = true;
+        const depth = i - rightFrom;
+        mesh.position.set(0, stackTop - (i + 0.5) * SHEET_T, 0);
+        mesh.rotation.z = depth === 0 ? 0 : -this.fanAngle(depth);
+      }
+    }
+    // during flight the static content planes hide (the flying sheet shows its faces)
+    obj.leftContent.visible = false;
+    obj.rightContent.visible = false;
+  }
+
+  private prepareFlipSheet(k: number, dir: 1 | -1): void {
+    const entry = this.openEntry;
+    if (!entry) return;
+    const obj = entry.obj;
+    const { sheets: S } = journalDims(this.pageCount);
+    const stackTop = COVER_T + S * SHEET_T;
+    obj.flipGroup.visible = true;
+    obj.flipGroup.position.y =
+      dir === 1 ? stackTop - (k + 0.5) * SHEET_T : COVER_T + (k - 0.5) * SHEET_T;
+    obj.flipGroup.rotation.z = 0;
+
+    const frontIdx = 2 * k + 1;
+    const backIdx = 2 * k + 2;
+    if (dir === 1) {
+      // forward: front face shows the current right page, back face the next left page
+      const frontTex = this.textures.getPageTexture(frontIdx);
+      const backTex = backIdx < this.pageCount ? this.textures.getFlippedTexture(backIdx) : null;
+      const fm = obj.flipFront.material as THREE.MeshStandardMaterial;
+      fm.map = frontTex ?? null;
+      fm.color.set(frontTex ? '#ffffff' : this.paperColor);
+      fm.needsUpdate = true;
+      const bm = obj.flipBack.material as THREE.MeshStandardMaterial;
+      bm.map = backTex ?? null;
+      bm.color.set(backTex ? '#ffffff' : this.paperColor);
+      bm.needsUpdate = true;
+    } else {
+      // backward: sheet (k-1) returns right. Its up-face at theta=PI is the
+      // flipBack plane showing the current left page (2k); at theta=0 the
+      // flipFront plane shows page 2k-1 (the new right page).
+      const frontTex = 2 * k - 1 >= 0 ? this.textures.getPageTexture(2 * k - 1) : null;
+      const backTex = this.textures.getFlippedTexture(2 * k);
+      const fm = obj.flipFront.material as THREE.MeshStandardMaterial;
+      fm.map = frontTex ?? null;
+      fm.color.set(frontTex ? '#ffffff' : this.paperColor);
+      fm.needsUpdate = true;
+      const bm = obj.flipBack.material as THREE.MeshStandardMaterial;
+      bm.map = backTex ?? null;
+      bm.color.set(backTex ? '#ffffff' : this.paperColor);
+      bm.needsUpdate = true;
+    }
+    obj.flipBack.visible = false;
+    bendSheet(obj.flipFront.geometry, dir === 1 ? 0 : Math.PI, 0.9, dir === 1 ? 1 : -1);
+    bendSheet(obj.flipBack.geometry, dir === 1 ? 0 : Math.PI, 0.9, dir === 1 ? 1 : -1);
+    bendSheet(obj.flipEdge.geometry, dir === 1 ? 0 : Math.PI, 0.9, dir === 1 ? 1 : -1);
+  }
+
+  private updateFlip(now: number): void {
+    if (!this.flip.active || !this.openEntry) return;
+    const entry = this.openEntry;
+    const obj = entry.obj;
+    const t = clamp01((now - this.flip.start) / FLIP_DUR);
+    const e = easeOut(t);
+    const { dir, from } = this.flip;
+    const theta = dir === 1 ? e * Math.PI : (1 - e) * Math.PI;
+
+    bendSheet(obj.flipFront.geometry, theta, 0.95, dir === 1 ? 1 : -1);
+    bendSheet(obj.flipBack.geometry, theta, 0.95, dir === 1 ? 1 : -1);
+    bendSheet(obj.flipEdge.geometry, theta, 0.95, dir === 1 ? 1 : -1);
+    // the underside plane becomes visible once it rotates past vertical
+    obj.flipBack.visible = theta > HALF_PI * 1.03;
+    obj.flipFront.renderOrder = 20;
+    obj.flipBack.renderOrder = 21;
+    obj.flipEdge.renderOrder = 19;
+
+    // whole-book lean toward the flip
+    obj.offset.rotation.y = Math.sin(theta) * 0.05 * dir;
+
+    if (t >= 1) {
+      this.flip.active = false;
+      obj.flipGroup.visible = false;
+      obj.offset.rotation.y = 0;
+      this.spread = from + dir;
+      this.layoutOpenSpread(this.spread, false);
+      this.cb.onSpreadChange(this.spread);
+    }
+  }
+
+  private updateOpening(now: number): void {
+    const entry = this.openEntry;
+    if (!entry) return;
+    const t = clamp01((now - this.transitionStart) / OPEN_DUR);
+    const obj = entry.obj;
+    const root = obj.root;
+
+    // other journals slide away
+    for (const [id, j] of this.journals) {
+      if (id === entry.dto.id) continue;
+      const idx = this.order.indexOf(id);
+      const dirSign = idx < (this.order.indexOf(entry.dto.id) ?? 0) ? -1 : 1;
+      const away = easeInOut(clamp01(t * 1.6));
+      j.obj.root.position.x += ((dirSign * 5.2 - j.obj.root.position.x) * 0.16 * away);
+      j.obj.root.position.y += (-1.6 - j.obj.root.position.y) * 0.14 * away;
+      { const bm = j.blob.material as THREE.MeshBasicMaterial; bm.opacity = Math.max(0, bm.opacity - 0.05 * away); }
+    }
+
+    // phase A lift (0..0.18): root rises a bit more
+    const liftT = easeOut(clamp01(t / 0.18));
+    const baseY = SHELF_BASE_Y + SELECT_LIFT;
+    // phase B blossom (0.1..0.62): cover swings around vertical spine while standing
+    const blossom = easeInOut(clamp01((t - 0.08) / 0.54));
+    // phase C lay flat (0.5..1)
+    const layT = easeInOut(clamp01((t - 0.5) / 0.5));
+
+    root.position.y = lerp(baseY, 0.0, layT);
+    root.position.x = lerp(root.position.x, 0, easeInOut(clamp01(t / 0.5)));
+    root.position.z = lerp(root.position.z, 0, easeInOut(clamp01(t / 0.5)));
+    root.rotation.y = lerp(root.rotation.y, 0, easeInOut(clamp01(t / 0.5)));
+    // re-center: closed book centers on its cover; open spread centers on the spine
+    obj.offset.position.x = lerp(-JOURNAL_W / 2, 0, easeInOut(clamp01((t - 0.35) / 0.5)));
+
+    obj.stand.rotation.x = lerp(HALF_PI, 0, layT);
+    // slight backward tilt while standing during blossom
+    obj.stand.rotation.x += Math.sin(blossom * Math.PI) * 0.12 * (1 - layT);
+
+    // cover: closed -> open
+    const closedY = obj.coverPivot.userData.closedY as number;
+    const openY = COVER_T / 2 + 0.0006;
+    obj.coverPivot.rotation.z = blossom * Math.PI;
+    obj.coverPivot.position.y = lerp(closedY, openY, easeInOut(clamp01((blossom - 0.35) / 0.65)));
+
+    // sheets fan during blossom, then settle into stacks
+    const { sheets: S } = journalDims(this.pageCount);
+    const stackTop = COVER_T + S * SHEET_T;
+    for (let i = 0; i < S; i++) {
+      const mesh = obj.sheets[i];
+      const fanDelay = 0.1 + (i / Math.max(1, S)) * 0.25;
+      const fanT = easeOut(clamp01((t - fanDelay) / 0.35));
+      const side = i < this.spread ? -1 : 1;
+      const restAngle = i < this.spread
+        ? Math.PI - this.fanAngle(this.spread - 1 - i)
+        : -this.fanAngle(i - this.spread);
+      const bloomAngle = side * (0.5 + (i % 5) * 0.12) * fanT;
+      const targetY = i < this.spread
+        ? COVER_T + (i + 0.5) * SHEET_T
+        : stackTop - (i + 0.5) * SHEET_T;
+      mesh.position.y = lerp(mesh.position.y, targetY, 0.2 + 0.5 * layT);
+      if (layT > 0.55) {
+        const settle = easeInOut(clamp01((layT - 0.55) / 0.45));
+        const from = i < this.spread ? Math.PI * 0.995 - bloomAngle * 0.4 : bloomAngle;
+        mesh.rotation.z = lerp(from, restAngle, settle);
+      } else {
+        mesh.rotation.z = i < this.spread ? Math.PI * blossom * 0.995 : bloomAngle;
+      }
+    }
+
+    // spine flattens as the book lays flat
+    this.setSpineFlat(obj, layT);
+
+    // camera
+    const camT = easeInOut(t);
+    const openCam = this.openCamTarget();
+    const targetPos = new THREE.Vector3(0, lerp(1.4, openCam.pos.y, camT), lerp(4.1, openCam.pos.z, camT));
+    const targetLook = new THREE.Vector3(0, lerp(0.82, 0.03, camT), 0);
+    this.camPos.lerp(targetPos, 0.12 + 0.1 * camT);
+    this.camLook.lerp(targetLook, 0.12 + 0.1 * camT);
+    this.camFov = lerp(this.camFov, 36, 0.08);
+
+    if (t >= 1) {
+      this.mode = 'open';
+      root.position.set(0, 0, 0);
+      root.rotation.set(0, 0, 0);
+      obj.stand.rotation.x = 0;
+      obj.offset.position.x = 0;
+      const oc = this.openCamTarget();
+      this.camPos.copy(oc.pos);
+      this.camLook.copy(oc.look);
+      this.camFov = oc.fov;
+      this.camera.position.copy(this.camPos);
+      this.camera.lookAt(this.camLook);
+      this.camera.fov = this.camFov;
+      this.camera.updateProjectionMatrix();
+      this.layoutOpenSpread(this.spread, true);
+      this.cb.onOpenComplete();
+    }
+  }
+
+  private setSpineFlat(obj: JournalObject, flat: number): void {
+    // the spine column shrinks into the gutter as the book lays flat
+    const spine = obj.spine;
+    if (spine.userData.baseY == null) spine.userData.baseY = spine.position.y;
+    const s = lerp(1, 0.04, flat);
+    spine.scale.y = s;
+    spine.position.y = lerp(spine.userData.baseY as number, COVER_T * 0.6, flat);
+  }
+
+  private updateClosing(now: number): void {
+    const entry = this.openEntry;
+    if (!entry) return;
+    const t = clamp01((now - this.transitionStart) / CLOSE_DUR);
+    const obj = entry.obj;
+    const stand = easeInOut(clamp01(t / 0.75));
+
+    obj.stand.rotation.x = lerp(0, HALF_PI, stand);
+    obj.root.position.y = lerp(0, SHELF_BASE_Y + SELECT_LIFT, stand);
+    obj.root.position.x = lerp(0, 0, stand);
+    obj.root.rotation.y = lerp(0, 0, stand);
+
+    // pages + cover fold shut while standing up
+    const fold = easeInOut(clamp01((t - 0.25) / 0.7));
+    const closedY = obj.coverPivot.userData.closedY as number;
+    obj.coverPivot.rotation.z = (1 - fold) * Math.PI;
+    obj.coverPivot.position.y = lerp(COVER_T / 2 + 0.0006, closedY, fold);
+
+    const { sheets: S } = journalDims(this.pageCount);
+    const stackTopC = COVER_T + S * SHEET_T;
+    for (let i = 0; i < S; i++) {
+      const mesh = obj.sheets[i];
+      const restAngle = i < this.spread
+        ? Math.PI - this.fanAngle(this.spread - 1 - i)
+        : -this.fanAngle(i - this.spread);
+      const closedY = stackTopC - (i + 0.5) * SHEET_T;
+      mesh.rotation.z = lerp(restAngle, 0, fold);
+      mesh.position.y = lerp(mesh.position.y, closedY, fold);
+    }
+    obj.offset.position.x = lerp(0, -JOURNAL_W / 2, easeInOut(clamp01((t - 0.3) / 0.6)));
+    this.setSpineFlat(obj, 1 - stand);
+
+    // camera back to shelf pose
+    const camT = easeInOut(t);
+    const ocStart = this.openCamTarget();
+    const targetPos = new THREE.Vector3(0, lerp(ocStart.pos.y, 1.06, camT), lerp(ocStart.pos.z, 5.2, camT));
+    const targetLook = new THREE.Vector3(0, lerp(0.03, 0.7, camT), 0);
+    this.camPos.lerp(targetPos, 0.14);
+    this.camLook.lerp(targetLook, 0.14);
+    this.camFov = lerp(this.camFov, 33, 0.1);
+
+    // other journals return
+    for (const [id, j] of this.journals) {
+      if (id === entry.dto.id) continue;
+      const idx = this.order.indexOf(id);
+      const tx = (idx - this.scroll) * SHELF_SPACING;
+      const back = easeInOut(clamp01((t - 0.3) / 0.7));
+      j.obj.root.position.x = lerp(j.obj.root.position.x, tx, back * 0.2);
+      j.obj.root.position.y = lerp(j.obj.root.position.y, SHELF_BASE_Y, back * 0.2);
+      { const bm = j.blob.material as THREE.MeshBasicMaterial; bm.opacity = Math.min(0.5, bm.opacity + 0.03 * back); }
+    }
+
+    if (t >= 1) {
+      this.mode = 'shelf';
+      this.camPos.set(0, 1.06, 5.2);
+      this.camLook.set(0, 0.7, 0);
+      this.camFov = 33;
+      this.camera.position.copy(this.camPos);
+      this.camera.lookAt(this.camLook);
+      this.camera.fov = this.camFov;
+      this.camera.updateProjectionMatrix();
+      this.layoutAll();
+      this.cb.onCloseComplete();
+    }
+  }
+
+  private layoutAll(): void {
+    this.order.forEach((id, i) => {
+      const entry = this.journals.get(id);
+      if (entry) this.layoutJournal(entry, i);
+    });
+  }
+
+  /* ================================================================ */
+  /* frame loop                                                        */
+  /* ================================================================ */
+
+  private loop = (): void => {
+    if (this.disposed) return;
+    this.raf = requestAnimationFrame(this.loop);
+    const now = this.clock.getElapsedTime();
+
+    // shelf scroll easing + sway
+    if (this.mode === 'shelf') {
+      this.scroll = lerp(this.scroll, this.scrollTarget, 0.14);
+      this.order.forEach((id, i) => {
+        const entry = this.journals.get(id);
+        if (!entry) return;
+        const fromCenter = i - this.scroll;
+        const root = entry.obj.root;
+        root.position.x = fromCenter * SHELF_SPACING;
+        root.position.z = -Math.min(0.55, Math.abs(fromCenter) * 0.22);
+        root.rotation.y = Math.max(-0.4, Math.min(0.4, -fromCenter * 0.16 - this.dragVelocity * 1.4));
+        const isSelected = id === this.selectedId;
+        const targetY = SHELF_BASE_Y + (isSelected ? SELECT_LIFT : 0);
+        root.position.y = lerp(root.position.y, targetY, 0.14);
+        entry.blob.position.set(root.position.x, 0.004, root.position.z + 0.05);
+        const blobMat = entry.blob.material as THREE.MeshBasicMaterial;
+        blobMat.opacity = lerp(blobMat.opacity, isSelected ? 0.55 : 0.34, 0.14);
+      });
+      this.dragVelocity *= 0.9;
+    } else if (this.mode === 'opening') {
+      this.updateOpening(now);
+    } else if (this.mode === 'open') {
+      this.updateFlip(now);
+      // gentle idle float of the open book
+      const entry = this.openEntry;
+      if (entry && !this.flip.active) {
+        entry.obj.root.position.y = Math.sin(now * 0.8) * 0.008;
+        entry.obj.root.rotation.z = Math.sin(now * 0.5) * 0.004;
+      }
+    } else if (this.mode === 'closing') {
+      this.updateClosing(now);
+    }
+
+    // tilt parallax
+    this.tiltX = lerp(this.tiltX, this.tiltTargetX, 0.06);
+    this.tiltY = lerp(this.tiltY, this.tiltTargetY, 0.06);
+    const flipNudge = this.flip.active ? Math.sin((this.flip.dir === 1 ? easeOut(clamp01((now - this.flip.start) / FLIP_DUR)) : 1 - easeOut(clamp01((now - this.flip.start) / FLIP_DUR))) * Math.PI) * 0.06 * this.flip.dir : 0;
+    this.camera.position.set(
+      this.camPos.x + this.tiltX + flipNudge,
+      this.camPos.y + this.tiltY,
+      this.camPos.z,
+    );
+    this.camera.lookAt(this.camLook);
+    if (Math.abs(this.camera.fov - this.camFov) > 0.01) {
+      this.camera.fov = this.camFov;
+      this.camera.updateProjectionMatrix();
+    }
+
+    this.sun.position.set(this.camPos.x - 2.2, 4.2, this.camPos.z + 2.6);
+    this.renderer.render(this.scene, this.camera);
+  };
+
+  private updateCameraFit(): void {
+    if (this.mode !== 'shelf') return;
+    const aspect = this.camera.aspect;
+    // portrait phones: pull the camera back a touch and widen fov
+    if (aspect < 1) {
+      this.camFov = 33 + Math.min(14, (1 - aspect) * 26);
+      this.camPos.z = 5.2 + Math.min(1.8, (1 - aspect) * 3.6);
+    } else {
+      this.camFov = 33;
+      this.camPos.z = 5.2;
+    }
+  }
+
+  /* ================================================================ */
+  /* events                                                            */
+  /* ================================================================ */
+
+  private onPointerDown = (e: PointerEvent): void => {
+    if (e.button !== 0 && e.pointerType === 'mouse') return;
+    this.dragging = true;
+    this.dragStartX = e.clientX;
+    this.dragLastX = e.clientX;
+    this.dragMoved = 0;
+    this.pointerDownInfo = {
+      x: e.clientX,
+      y: e.clientY,
+      t: performance.now(),
+      id: this.selectedId ?? '',
+    };
+    (e.target as Element).setPointerCapture?.(e.pointerId);
+  };
+
+  private onPointerMove = (e: PointerEvent): void => {
+    // tilt target from pointer position
+    const rect = this.renderer.domElement.getBoundingClientRect();
+    const nx = ((e.clientX - rect.left) / rect.width) * 2 - 1;
+    const ny = ((e.clientY - rect.top) / rect.height) * 2 - 1;
+    this.tiltTargetX = this.tiltEnabled ? nx * 0.12 : 0;
+    this.tiltTargetY = this.tiltEnabled ? -ny * 0.07 : 0;
+
+    if (!this.dragging) return;
+    const dx = e.clientX - this.dragLastX;
+    this.dragLastX = e.clientX;
+    this.dragMoved += Math.abs(dx);
+    if (this.mode === 'shelf') {
+      this.scrollTarget = this.scrollTarget - dx * 0.011;
+      this.scrollTarget = Math.max(-0.35, Math.min(this.order.length - 1 + 0.35, this.scrollTarget));
+      this.dragVelocity = lerp(this.dragVelocity, -dx * 0.02, 0.4);
+    }
+  };
+
+  private onPointerUp = (e: PointerEvent): void => {
+    if (!this.dragging) return;
+    this.dragging = false;
+    const wasDrag = this.dragMoved > 7;
+    const info = this.pointerDownInfo;
+    this.pointerDownInfo = null;
+    if (this.mode === 'shelf') {
+      // snap to nearest
+      this.scrollTarget = Math.max(0, Math.min(this.order.length - 1, Math.round(this.scrollTarget)));
+      const newSel = this.order[Math.round(this.scrollTarget)] ?? null;
+      if (newSel && newSel !== this.selectedId) {
+        this.selectedId = newSel;
+        this.cb.onJournalSelect(newSel);
+        playTap();
+      }
+      if (!wasDrag && info) {
+        const hit = this.pickJournal(e);
+        if (hit) {
+          if (hit === this.selectedId) {
+            const now = performance.now();
+            if (this.lastTapTarget === hit && now - this.lastTapTime < 600) {
+              // double tap selected -> open immediately
+              this.cb.onJournalTap(hit);
+            } else {
+              this.cb.onJournalTap(hit);
+            }
+            this.lastTapTime = now;
+            this.lastTapTarget = hit;
+          } else {
+            this.selectedId = hit;
+            this.scrollTarget = this.order.indexOf(hit);
+            this.cb.onJournalSelect(hit);
+            playTap();
+          }
+        }
+      }
+      return;
+    }
+    if (this.mode === 'open' && !wasDrag && info) {
+      this.handleOpenTap(e);
+    }
+  };
+
+  private handleOpenTap(e: PointerEvent): void {
+    if (this.flip.active) return;
+    const hit = this.pickSpread(e);
+    if (!hit) return;
+    const { side, bookX } = hit;
+    // page center zone -> edit page; anywhere else on a page -> flip
+    const pageCenterX = side === 1 ? JOURNAL_W / 2 : -JOURNAL_W / 2;
+    const inCenterX = Math.abs(bookX - pageCenterX) < JOURNAL_W * 0.21;
+    const inCenterZ = Math.abs(hit.localZ) < JOURNAL_H * 0.3;
+    if (inCenterX && inCenterZ) {
+      const pageIndex = side === 1 ? 2 * this.spread + 1 : 2 * this.spread;
+      if (pageIndex >= 0 && pageIndex < this.pageCount) {
+        const now = performance.now();
+        this.lastTapTime = now;
+        this.lastTapTarget = `p${pageIndex}`;
+        this.cb.onEditPage(pageIndex); // tap page center = edit (Paper behavior)
+      }
+      return;
+    }
+    const dir: 1 | -1 = side === 1 ? 1 : -1;
+    if (!this.flipPage(dir)) playTap();
+  }
+
+  private pickJournal(e: PointerEvent): string | null {
+    const rect = this.renderer.domElement.getBoundingClientRect();
+    const ndc = new THREE.Vector2(
+      ((e.clientX - rect.left) / rect.width) * 2 - 1,
+      -((e.clientY - rect.top) / rect.height) * 2 + 1,
+    );
+    this.raycaster.setFromCamera(ndc, this.camera);
+    const hits = this.raycaster.intersectObjects(this.scene.children, true);
+    for (const h of hits) {
+      let o: THREE.Object3D | null = h.object;
+      while (o) {
+        if (o.userData && typeof o.userData.journalId === 'string' && o.userData.journalId) {
+          return o.userData.journalId as string;
+        }
+        o = o.parent;
+      }
+    }
+    return null;
+  }
+
+  private pickSpread(e: PointerEvent): { side: 1 | -1; bookX: number; localZ: number } | null {
+    const entry = this.openEntry;
+    if (!entry) return null;
+    const rect = this.renderer.domElement.getBoundingClientRect();
+    const ndc = new THREE.Vector2(
+      ((e.clientX - rect.left) / rect.width) * 2 - 1,
+      -((e.clientY - rect.top) / rect.height) * 2 + 1,
+    );
+    this.raycaster.setFromCamera(ndc, this.camera);
+    const targets = [
+      ...entry.obj.sheets,
+      entry.obj.rightContent,
+      entry.obj.leftContent,
+      entry.obj.rightWell,
+      entry.obj.coverPivot,
+      entry.obj.flipGroup,
+    ];
+    const hits = this.raycaster.intersectObjects(targets, true);
+    if (hits.length === 0) return null;
+    // offset local space: spine at x=0; right page spans 0..W, left page -W..0
+    const p = entry.obj.offset.worldToLocal(hits[0].point.clone());
+    const side: 1 | -1 = p.x >= 0 ? 1 : -1;
+    return { side, bookX: p.x, localZ: p.z };
+  }
+
+  private bindEvents(): void {
+    const el = this.renderer.domElement;
+    el.addEventListener('pointerdown', this.onPointerDown);
+    el.addEventListener('pointermove', this.onPointerMove);
+    el.addEventListener('pointerup', this.onPointerUp);
+    el.addEventListener('pointercancel', this.onPointerUp);
+    window.addEventListener('resize', this.onWinResize);
+    window.addEventListener('deviceorientation', this.onDeviceOrientation);
+  }
+
+  private unbindEvents(): void {
+    const el = this.renderer.domElement;
+    el.removeEventListener('pointerdown', this.onPointerDown);
+    el.removeEventListener('pointermove', this.onPointerMove);
+    el.removeEventListener('pointerup', this.onPointerUp);
+    el.removeEventListener('pointercancel', this.onPointerUp);
+    window.removeEventListener('resize', this.onWinResize);
+    window.removeEventListener('deviceorientation', this.onDeviceOrientation);
+  }
+
+  private onWinResize = (): void => {
+    this.resize();
+  };
+
+  private onDeviceOrientation = (e: DeviceOrientationEvent): void => {
+    if (!this.tiltEnabled || e.gamma == null || e.beta == null) return;
+    this.tiltTargetX = Math.max(-1, Math.min(1, e.gamma / 30)) * 0.14;
+    this.tiltTargetY = Math.max(-1, Math.min(1, (e.beta - 45) / 40)) * 0.08;
+  };
+}

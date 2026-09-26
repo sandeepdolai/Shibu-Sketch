@@ -38,3 +38,29 @@ model SavedProject {
   createdAt DateTime @default(now())
   updatedAt DateTime @updatedAt
 }
+
+// ---------------------------------------------------------------------
+// Shibu-Sketch data layer
+// coverStyle / content are stored as JSON strings (parsed in src/lib/sketch/types.ts)
+// ---------------------------------------------------------------------
+
+model SketchJournal {
+  id         String       @id @default(cuid())
+  title      String
+  coverStyle String       @default("{}")
+  paperColor String       @default("#faf8f4")
+  order      Int          @default(0)
+  createdAt  DateTime     @default(now())
+  updatedAt  DateTime     @updatedAt
+  pages      SketchPage[]
+}
+
+model SketchPage {
+  id        String        @id @default(cuid())
+  journalId String
+  journal   SketchJournal @relation(fields: [journalId], references: [id], onDelete: Cascade)
+  index     Int
+  content   String        @default("{}")
+
+  @@unique([journalId, index])
+}

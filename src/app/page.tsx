@@ -1,27 +1,27 @@
 'use client';
 
 /**
- * ACAN3D — AI-Controllable Web-Based 3D Software.
- * The editor is client-only (WebGL + imperative three.js engine).
+ * Shibu-Sketch — a pocket journal studio in the browser.
+ * Sketch, sticker, and flip through beautiful 3D notebooks.
+ * (Client-only: WebGL + imperative three.js engine.)
  */
 
 import dynamic from 'next/dynamic';
 
-const EditorShell = dynamic(
-  () => import('@/components/editor/EditorShell').then((m) => m.EditorShell),
-  {
-    ssr: false,
-    loading: () => (
-      <div className="flex h-[100dvh] w-full flex-col items-center justify-center gap-3 bg-background text-foreground">
-        <div className="flex size-10 animate-pulse items-center justify-center rounded-lg bg-amber-500 font-bold text-zinc-950">
-          A
-        </div>
-        <p className="text-sm text-muted-foreground">Starting ACAN3D engine…</p>
+const SketchApp = dynamic(() => import('@/components/sketch/SketchApp'), {
+  ssr: false,
+  loading: () => (
+    <div className="flex h-[100dvh] w-full flex-col items-center justify-center gap-3 bg-[#8b88a6] text-white">
+      <div className="flex items-end gap-1">
+        <span className="inline-block h-6 w-1.5 animate-pulse rounded-full bg-white/90" />
+        <span className="inline-block h-8 w-1.5 animate-pulse rounded-full bg-white/70 [animation-delay:120ms]" />
+        <span className="inline-block h-7 w-1.5 animate-pulse rounded-full bg-white/80 [animation-delay:240ms]" />
       </div>
-    ),
-  },
-);
+      <p className="text-sm font-medium tracking-wide">Opening your journals…</p>
+    </div>
+  ),
+});
 
-export default function Home() {
-  return <EditorShell />;
+export default function Page() {
+  return <SketchApp />;
 }

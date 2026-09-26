@@ -14,16 +14,16 @@ const geistMono = Geist_Mono({
 });
 
 export const metadata: Metadata = {
-  title: "ACAN3D — AI-Controllable Web-Based 3D Software",
+  title: "Shibu Sketch — Pocket Journal Studio",
   description:
-    "A browser-based 3D creation and animation environment with a structured agent control API. Build books, objects and scenes with real modeling tools.",
-  keywords: ["ACAN3D", "3D editor", "WebGL", "three.js", "agent API", "procedural modeling"],
+    "Sketch, sticker and flip through beautiful 3D notebooks in your browser. A pocket journal studio with real paper feel.",
+  keywords: ["Shibu Sketch", "journal", "sketchbook", "drawing", "WebGL", "3D book"],
   icons: {
     icon: "https://z-cdn.chatglm.cn/z-ai/static/logo.svg",
   },
   openGraph: {
-    title: "ACAN3D",
-    description: "AI-controllable web-based 3D creation software",
+    title: "Shibu Sketch",
+    description: "A pocket journal studio with real paper feel",
     type: "website",
   },
 };
