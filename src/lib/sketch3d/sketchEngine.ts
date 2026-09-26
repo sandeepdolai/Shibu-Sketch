@@ -22,7 +22,7 @@ import {
   type PageTextureProvider,
 } from './journalObject';
 import { bendSheet } from './sheetGeom';
-import { getShadowBlobTexture, makeCoverTexture } from './art';
+import { getShadowBlobTexture, getGutterShadowTexture, makeCoverTexture } from './art';
 import { renderPageContentToCanvas } from '@/lib/sketch/render';
 import type { JournalDTO, JournalDetailDTO, PageContent } from '@/lib/sketch/types';
 import { parsePageContent } from '@/lib/sketch/types';
@@ -72,6 +72,13 @@ interface FlipState {
   start: number; // seconds
 }
 
+interface SpreadTween {
+  active: boolean;
+  from: number;
+  to: number;
+  start: number; // seconds
+}
+
 export class SketchEngine {
   private container: HTMLElement;
   private cb: SketchEngineCallbacks;
@@ -93,6 +100,8 @@ export class SketchEngine {
   private spread = 0;
   private transitionStart = 0;
   private flip: FlipState = { active: false, dir: 1, from: 0, start: 0 };
+  private spreadTween: SpreadTween = { active: false, from: 0, to: 0, start: 0 };
+  private static readonly TWEEN_DUR = 0.34;
 
   /* shelf scroll */
   private scroll = 0; // float index
@@ -203,7 +212,10 @@ export class SketchEngine {
       const existing = this.journals.get(dto.id);
       if (existing) {
         existing.dto = dto;
-        this.layoutJournal(existing, i);
+        // Only re-pose on the shelf. In open/opening/closing modes the
+        // journals hold transition poses (slide-away, lay-flat) that must
+        // not be clobbered by shelf layout (e.g. after add/delete page).
+        if (this.mode === 'shelf') this.layoutJournal(existing, i);
       } else {
         this.addJournal(dto, i);
       }
@@ -242,12 +254,14 @@ export class SketchEngine {
     this.mode = 'closing';
     this.transitionStart = this.clock.getElapsedTime();
     this.flip.active = false;
+    this.spreadTween.active = false;
     if (this.openEntry) this.openEntry.obj.flipGroup.visible = false;
   }
 
   /** Rebuild the currently-open journal in place (e.g. after pages were added). */
   reloadOpenJournal(detail: JournalDetailDTO): void {
     if (this.mode !== 'open' || !this.openEntry) return;
+    this.spreadTween.active = false;
     const keepSpread = this.spread;
     const oldId = this.openEntry.dto.id;
     this.removeJournal(oldId);
@@ -275,6 +289,7 @@ export class SketchEngine {
     this.mode = 'shelf';
     this.openEntry = null;
     this.flip.active = false;
+    this.spreadTween.active = false;
     this.camFov = 33;
     this.updateCameraFit();
     this.camPos.set(0, 1.06, 5.2);
@@ -305,7 +320,7 @@ export class SketchEngine {
 
   /** Flip one page. Returns false if impossible (edge / busy). */
   flipPage(dir: 1 | -1): boolean {
-    if (this.mode !== 'open' || this.flip.active) return false;
+    if (this.mode !== 'open' || this.flip.active || this.spreadTween.active) return false;
     const to = this.spread + dir;
     if (to < 0 || to >= this.spreadCount()) return false;
     this.flip = { active: true, dir, from: this.spread, start: this.clock.getElapsedTime() };
@@ -321,14 +336,71 @@ export class SketchEngine {
     return true;
   }
 
-  /** Jump directly to a spread (scrubber). */
+  /** Jump directly to a spread (scrubber) — sheets glide through the
+   *  intermediate stack poses instead of snapping. */
   setSpread(k: number): void {
     if (this.mode !== 'open' || this.flip.active) return;
     const nk = Math.max(0, Math.min(k, this.spreadCount() - 1));
-    if (nk === this.spread) return;
-    this.spread = nk;
-    this.layoutOpenSpread(nk, false);
+    const from = this.spreadTween.active ? this.tweenFloat() : this.spread;
+    if (!this.spreadTween.active && nk === this.spread) return;
+    this.spreadTween = { active: true, from, to: nk, start: this.clock.getElapsedTime() };
     this.cb.onSpreadChange(nk);
+  }
+
+  private tweenFloat(): number {
+    const { from, to, start } = this.spreadTween;
+    const t = clamp01((this.clock.getElapsedTime() - start) / SketchEngine.TWEEN_DUR);
+    return lerp(from, to, easeInOut(t));
+  }
+
+  /** Sheets posed at a fractional spread (scrub tween). */
+  private layoutSheetsContinuous(f: number): void {
+    const entry = this.openEntry;
+    if (!entry) return;
+    const obj = entry.obj;
+    const { sheets: S } = journalDims(this.pageCount);
+    const stackTop = COVER_T + S * SHEET_T;
+    const kMax = this.spreadCount() - 1;
+    const k0 = Math.max(0, Math.min(Math.floor(f), kMax));
+    const k1 = Math.min(k0 + 1, kMax);
+    const u = easeInOut(clamp01(f - k0));
+    for (let i = 0; i < S; i++) {
+      const mesh = obj.sheets[i];
+      mesh.visible = true;
+      const pose = (k: number): { y: number; rz: number } => {
+        if (i < k) {
+          const depth = k - 1 - i;
+          return {
+            y: COVER_T + (i + 0.5) * SHEET_T,
+            rz: depth === 0 ? Math.PI : Math.PI + this.fanAngle(depth),
+          };
+        }
+        const depth = i - k;
+        return {
+          y: stackTop - (i + 0.5) * SHEET_T,
+          rz: depth === 0 ? 0 : -this.fanAngle(depth),
+        };
+      };
+      const a = pose(k0);
+      const b = pose(k1);
+      mesh.position.y = lerp(a.y, b.y, u);
+      mesh.rotation.z = lerp(a.rz, b.rz, u);
+    }
+  }
+
+  private updateSpreadTween(): void {
+    const entry = this.openEntry;
+    if (!entry) return;
+    const f = this.tweenFloat();
+    this.layoutSheetsContinuous(f);
+    // static content planes hide while the sheets sweep across them
+    entry.obj.leftContent.visible = false;
+    entry.obj.rightContent.visible = false;
+    if ((this.clock.getElapsedTime() - this.spreadTween.start) / SketchEngine.TWEEN_DUR >= 1) {
+      this.spreadTween.active = false;
+      this.spread = this.spreadTween.to;
+      this.layoutOpenSpread(this.spread, false);
+    }
   }
 
   /** Update a page's content after editing and refresh its textures. */
@@ -502,14 +574,27 @@ export class SketchEngine {
     return tex;
   }
 
-  /** Open-pose camera target (pulls back on narrow screens). */
+  /** Open-pose camera direction (keeps the desktop viewing angle). */
+  private openCamDir = new THREE.Vector3(0, 0.655, 0.757);
+
+  /** Open-pose camera target — fits the whole spread at ANY aspect ratio.
+   *  Distance solves both the vertical (page depth) and horizontal
+   *  (both pages) constraints; portrait phones pull way back. */
   private openCamTarget(): { pos: THREE.Vector3; look: THREE.Vector3; fov: number } {
     const aspect = this.camera.aspect || 1;
-    const extra = Math.max(0, (1.35 - aspect)) * 1.7;
+    const fov = aspect < 0.9 ? 44 : 36;
+    const tanF = Math.tan((fov * Math.PI) / 360);
+    const needV = JOURNAL_H * 1.38; // page depth + breathing room
+    const needW = JOURNAL_W * 2 + 0.3; // both pages + margin
+    const dist = Math.max(needV / (2 * tanF), needW / (2 * tanF * aspect));
     return {
-      pos: new THREE.Vector3(0, 1.95 + extra * 0.35, 2.25 + extra),
+      pos: new THREE.Vector3(
+        this.openCamDir.x * dist,
+        this.openCamDir.y * dist,
+        this.openCamDir.z * dist,
+      ),
       look: new THREE.Vector3(0, 0.03, 0),
-      fov: 36 + Math.min(6, extra * 3),
+      fov,
     };
   }
 
@@ -533,7 +618,9 @@ export class SketchEngine {
       if (i < k) {
         const depth = k - 1 - i; // 0 = top of the left pile
         mesh.position.set(0, COVER_T + (i + 0.5) * SHEET_T, 0);
-        mesh.rotation.z = depth === 0 ? Math.PI : Math.PI - this.fanAngle(depth);
+        // PI + theta dips the fore-edge BELOW the page plane (mirrors the
+        // right stack). PI - theta would sweep the fan UP over the content.
+        mesh.rotation.z = depth === 0 ? Math.PI : Math.PI + this.fanAngle(depth);
       } else {
         const depth = i - k; // 0 = top of the right stack
         mesh.position.set(0, stackTop - (i + 0.5) * SHEET_T, 0);
@@ -553,7 +640,9 @@ export class SketchEngine {
     obj.leftContent.rotation.z = 0; // left geometry already spans -W..0
     obj.leftContent.position.y = leftTopY + 0.0012;
     applyPageTexture(obj.leftContent, leftIdx, this.textures, this.paperColor, 'left');
-    obj.leftContent.visible = show && k > 0 && leftIdx < this.pageCount;
+    // At k=0 the left page is the inside front cover: page 0 is "printed on
+    // the liner" so the title page is never orphaned.
+    obj.leftContent.visible = show && leftIdx < this.pageCount;
     obj.rightContent.rotation.z = 0;
     obj.rightContent.position.y = rightTopY + 0.0012;
     applyPageTexture(obj.rightContent, rightIdx, this.textures, this.paperColor);
@@ -585,7 +674,7 @@ export class SketchEngine {
         mesh.visible = true;
         const depth = leftCount - 1 - i;
         mesh.position.set(0, COVER_T + (i + 0.5) * SHEET_T, 0);
-        mesh.rotation.z = depth === 0 ? Math.PI : Math.PI - this.fanAngle(depth);
+        mesh.rotation.z = depth === 0 ? Math.PI : Math.PI + this.fanAngle(depth);
       } else if (i >= rightFrom) {
         mesh.visible = true;
         const depth = i - rightFrom;
@@ -672,9 +761,15 @@ export class SketchEngine {
       0,
     );
     shadow.rotation.z = Math.sin(theta) * 0.35 * dir;
-    const shScale = 0.75 + Math.sin(theta) * 0.35;
-    shadow.scale.set(shScale, shScale * 0.9, 1);
-    (shadow.material as THREE.MeshBasicMaterial).opacity = 0.3 * Math.sin(theta);
+    const s = Math.sin(theta);
+    const shScale = 0.7 + s * 0.5;
+    shadow.scale.set(shScale, shScale * 1.02, 1);
+    (shadow.material as THREE.MeshBasicMaterial).opacity = 0.34 * Math.pow(s, 1.4);
+    // gutter contact shadow: darkest while the page stands over the spine
+    const gutter = obj.gutterShadow;
+    gutter.visible = true;
+    gutter.position.y = stackTopNow + 0.004;
+    (gutter.material as THREE.MeshBasicMaterial).opacity = 0.4 * s;
     obj.flipFront.renderOrder = 20;
     obj.flipBack.renderOrder = 21;
     obj.flipEdge.renderOrder = 19;
@@ -686,6 +781,7 @@ export class SketchEngine {
       this.flip.active = false;
       obj.flipGroup.visible = false;
       obj.flipShadow.visible = false;
+      obj.gutterShadow.visible = false;
       obj.offset.rotation.y = 0;
       this.spread = from + dir;
       this.layoutOpenSpread(this.spread, false);
@@ -745,7 +841,7 @@ export class SketchEngine {
       const fanT = easeOut(clamp01((t - fanDelay) / 0.35));
       const side = i < this.spread ? -1 : 1;
       const restAngle = i < this.spread
-        ? Math.PI - this.fanAngle(this.spread - 1 - i)
+        ? Math.PI + this.fanAngle(this.spread - 1 - i)
         : -this.fanAngle(i - this.spread);
       const bloomAngle = side * (0.5 + (i % 5) * 0.12) * fanT;
       const targetY = i < this.spread
@@ -824,7 +920,7 @@ export class SketchEngine {
     for (let i = 0; i < S; i++) {
       const mesh = obj.sheets[i];
       const restAngle = i < this.spread
-        ? Math.PI - this.fanAngle(this.spread - 1 - i)
+        ? Math.PI + this.fanAngle(this.spread - 1 - i)
         : -this.fanAngle(i - this.spread);
       const closedY = stackTopC - (i + 0.5) * SHEET_T;
       mesh.rotation.z = lerp(restAngle, 0, fold);
@@ -893,7 +989,8 @@ export class SketchEngine {
         const root = entry.obj.root;
         root.position.x = fromCenter * SHELF_SPACING;
         root.position.z = -Math.min(0.55, Math.abs(fromCenter) * 0.22);
-        root.rotation.y = Math.max(-0.4, Math.min(0.4, -fromCenter * 0.16 - this.dragVelocity * 1.4));
+        const sway = Math.sin(now * 0.7 + i * 2.1) * 0.02;
+        root.rotation.y = Math.max(-0.45, Math.min(0.45, -fromCenter * 0.16 - this.dragVelocity * 2.4 + sway));
         const isSelected = id === this.selectedId;
         const targetY = SHELF_BASE_Y + (isSelected ? SELECT_LIFT : 0);
         root.position.y = lerp(root.position.y, targetY, 0.14);
@@ -905,6 +1002,7 @@ export class SketchEngine {
     } else if (this.mode === 'opening') {
       this.updateOpening(now);
     } else if (this.mode === 'open') {
+      if (this.spreadTween.active) this.updateSpreadTween();
       this.updateFlip(now);
       // gentle idle float of the open book
       const entry = this.openEntry;

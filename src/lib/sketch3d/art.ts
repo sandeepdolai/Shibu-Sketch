@@ -341,3 +341,22 @@ export function getShadowBlobTexture(): THREE.CanvasTexture {
   blobTex.colorSpace = THREE.SRGBColorSpace;
   return blobTex;
 }
+
+let gutterTex: THREE.CanvasTexture | null = null;
+/** Soft horizontal contact-shadow strip for the open book's gutter
+ *  (darkens while a page is in the air during a flip). */
+export function getGutterShadowTexture(): THREE.CanvasTexture {
+  if (gutterTex) return gutterTex;
+  const W = 128;
+  const H = 32;
+  const [canvas, ctx] = makeCanvas(W, H);
+  const g = ctx.createLinearGradient(0, 0, W, 0);
+  g.addColorStop(0, 'rgba(15,12,20,0)');
+  g.addColorStop(0.5, 'rgba(15,12,20,0.62)');
+  g.addColorStop(1, 'rgba(15,12,20,0)');
+  ctx.fillStyle = g;
+  ctx.fillRect(0, 0, W, H);
+  gutterTex = new THREE.CanvasTexture(canvas);
+  gutterTex.colorSpace = THREE.SRGBColorSpace;
+  return gutterTex;
+}

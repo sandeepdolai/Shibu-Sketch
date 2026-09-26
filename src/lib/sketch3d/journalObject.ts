@@ -13,7 +13,7 @@
 import * as THREE from 'three';
 import { RoundedBoxGeometry } from 'three/examples/jsm/geometries/RoundedBoxGeometry.js';
 import { createSheetSurface, createSheetSlab } from './sheetGeom';
-import { getForeEdgeTexture, getPaperTexture, getShadowBlobTexture } from './art';
+import { getForeEdgeTexture, getPaperTexture, getShadowBlobTexture, getGutterShadowTexture } from './art';
 
 const HALF_PI = Math.PI / 2;
 
@@ -61,6 +61,7 @@ export interface JournalObject {
   tapZoneL: THREE.Mesh;
   tapZoneR: THREE.Mesh;
   flipShadow: THREE.Mesh;
+  gutterShadow: THREE.Mesh;
   dispose(): void;
 }
 
@@ -242,6 +243,23 @@ export function buildJournal(opts: BuildJournalOpts): JournalObject {
   flipShadow.visible = false;
   offset.add(flipShadow);
 
+  /* -------- gutter contact shadow (darkens while a page is in the air) -------- */
+  const gutterShadow = new THREE.Mesh(
+    track(new THREE.PlaneGeometry(W * 0.55, H * 0.96)),
+    track(
+      new THREE.MeshBasicMaterial({
+        map: getGutterShadowTexture(),
+        transparent: true,
+        depthWrite: false,
+        opacity: 0,
+      }),
+    ),
+  );
+  gutterShadow.rotation.x = -HALF_PI;
+  gutterShadow.renderOrder = 29;
+  gutterShadow.visible = false;
+  offset.add(gutterShadow);
+
   const api: JournalObject = {
     root,
     stand,
@@ -261,6 +279,7 @@ export function buildJournal(opts: BuildJournalOpts): JournalObject {
     tapZoneL,
     tapZoneR,
     flipShadow,
+    gutterShadow,
     dispose() {
       for (const d of disposables) d.dispose();
     },

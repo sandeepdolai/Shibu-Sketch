@@ -385,6 +385,77 @@ export default function SketchApp() {
     }
   }, [detail, journals, toast]);
 
+  /** Insert a blank page right after the spread being viewed. */
+  const addPageAfterCurrent = useCallback(async () => {
+    if (!detail) return;
+    try {
+      const res = await fetch(`/api/sketch/journals/${detail.id}/pages`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ atIndex: spread * 2 + 2 }),
+      });
+      if (!res.ok) throw new Error();
+      const r2 = await fetch(`/api/sketch/journals/${detail.id}`, { cache: 'no-store' });
+      const data = (await r2.json()) as { journal: JournalDetailDTO };
+      setDetail(data.journal);
+      engineRef.current?.reloadOpenJournal(data.journal);
+      setJournals((cur) =>
+        cur.map((j) =>
+          j.id === data.journal.id ? { ...j, pageCount: data.journal.pages.length } : j,
+        ),
+      );
+      engineRef.current?.setJournals(
+        journals.map((j) =>
+          j.id === data.journal.id ? { ...j, pageCount: data.journal.pages.length } : j,
+        ),
+      );
+      toast('Page added', 'success');
+    } catch {
+      toast('Could not add page', 'destructive');
+    }
+  }, [detail, spread, journals, toast]);
+
+  /** Delete the page the reader is looking at (right page of the spread,
+   *  falling back to the left page on the last spread). */
+  const deleteCurrentPage = useCallback(async () => {
+    if (!detail) return;
+    if (detail.pages.length <= 2) {
+      toast('A journal needs at least 2 pages', 'destructive');
+      return;
+    }
+    const right = spread * 2 + 1;
+    const left = spread * 2;
+    const pageIndex = right < detail.pages.length ? right : left;
+    const page = detail.pages[pageIndex];
+    if (!page) return;
+    try {
+      const res = await fetch(`/api/sketch/journals/${detail.id}/pages/${page.id}`, {
+        method: 'DELETE',
+      });
+      if (!res.ok) throw new Error();
+      const r2 = await fetch(`/api/sketch/journals/${detail.id}`, { cache: 'no-store' });
+      const data = (await r2.json()) as { journal: JournalDetailDTO };
+      setDetail(data.journal);
+      engineRef.current?.reloadOpenJournal(data.journal);
+      engineRef.current?.setSpread(
+        Math.max(0, Math.min(spread, Math.ceil(data.journal.pages.length / 2) - 1)),
+      );
+      setJournals((cur) =>
+        cur.map((j) =>
+          j.id === data.journal.id ? { ...j, pageCount: data.journal.pages.length } : j,
+        ),
+      );
+      engineRef.current?.setJournals(
+        journals.map((j) =>
+          j.id === data.journal.id ? { ...j, pageCount: data.journal.pages.length } : j,
+        ),
+      );
+      toast('Page deleted', 'success');
+    } catch {
+      toast('Could not delete page', 'destructive');
+    }
+  }, [detail, spread, journals, toast]);
+
   const renameJournal = useCallback(async () => {
     if (!detail || !renameValue.trim()) return;
     try {
@@ -684,6 +755,8 @@ export default function SketchApp() {
           void deleteSelected();
         }}
         onExportPng={view === 'open' ? exportPagePng : undefined}
+        onAddPage={view === 'open' && detail ? () => void addPageAfterCurrent() : undefined}
+        onDeletePage={view === 'open' && detail ? () => void deleteCurrentPage() : undefined}
         onAbout={() => {
           setMenuOpen(false);
           setAboutOpen(true);

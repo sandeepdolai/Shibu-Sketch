@@ -10,7 +10,7 @@
 
 import { useState, type ReactNode } from 'react';
 
-import { Copy, ImageDown, Info, Pencil, Trash2 } from 'lucide-react';
+import { Copy, FileMinus, ImageDown, Info, Pencil, Plus, Trash2 } from 'lucide-react';
 
 import {
   AlertDialog,
@@ -45,6 +45,9 @@ export interface JournalMenuProps {
   onDelete: () => void;
   /** Only rendered when provided (page export makes sense in open mode). */
   onExportPng?: () => void;
+  /** Open-mode page management (hidden when absent). */
+  onAddPage?: () => void;
+  onDeletePage?: () => void;
   onAbout: () => void;
 }
 
@@ -87,13 +90,15 @@ export function JournalMenu({
   onDuplicate,
   onDelete,
   onExportPng,
+  onAddPage,
+  onDeletePage,
   onAbout,
 }: JournalMenuProps) {
-  const [confirming, setConfirming] = useState(false);
+  const [confirming, setConfirming] = useState<'journal' | 'page' | null>(null);
 
   /** Reset the confirm step on every close path (Esc, backdrop, X, action). */
   const handleMenuOpenChange = (o: boolean) => {
-    if (!o) setConfirming(false);
+    if (!o) setConfirming(null);
     onOpenChange(o);
   };
 
@@ -103,9 +108,11 @@ export function JournalMenu({
   };
 
   const handleDelete = () => {
-    setConfirming(false);
+    const kind = confirming;
+    setConfirming(null);
     onOpenChange(false);
-    onDelete();
+    if (kind === 'page' && onDeletePage) onDeletePage();
+    else if (kind === 'journal') onDelete();
   };
 
   return (
@@ -142,12 +149,27 @@ export function JournalMenu({
               onClick={() => runAndClose(onExportPng)}
             />
           )}
+          {onAddPage && (
+            <MenuAction
+              icon={<Plus className="size-4" />}
+              label="Add page after this spread"
+              onClick={() => runAndClose(onAddPage)}
+            />
+          )}
+          {onDeletePage && (
+            <MenuAction
+              icon={<FileMinus className="size-4" />}
+              label="Delete current page…"
+              destructive
+              onClick={() => setConfirming('page')}
+            />
+          )}
           {canDelete && (
             <MenuAction
               icon={<Trash2 className="size-4" />}
               label="Delete journal…"
               destructive
-              onClick={() => setConfirming(true)}
+              onClick={() => setConfirming('journal')}
             />
           )}
           <MenuAction
@@ -159,24 +181,47 @@ export function JournalMenu({
       </DialogContent>
 
       {/* Two-step delete confirmation, nested above the menu dialog. */}
-      <AlertDialog open={confirming} onOpenChange={setConfirming}>
+      <AlertDialog open={confirming !== null} onOpenChange={(o) => !o && setConfirming(null)}>
         <AlertDialogContent>
-          <AlertDialogHeader>
-            <AlertDialogTitle>Delete &ldquo;{journalTitle}&rdquo;?</AlertDialogTitle>
-            <AlertDialogDescription>
-              This cannot be undone. The journal and all of its pages will be
-              permanently removed.
-            </AlertDialogDescription>
-          </AlertDialogHeader>
-          <AlertDialogFooter>
-            <AlertDialogCancel>Cancel</AlertDialogCancel>
-            <AlertDialogAction
-              className="bg-destructive text-white hover:bg-destructive/90 focus-visible:ring-destructive"
-              onClick={handleDelete}
-            >
-              Delete
-            </AlertDialogAction>
-          </AlertDialogFooter>
+          {confirming === 'page' ? (
+            <>
+              <AlertDialogHeader>
+                <AlertDialogTitle>Delete this page?</AlertDialogTitle>
+                <AlertDialogDescription>
+                  The current page will be removed and later pages shift up. This
+                  cannot be undone.
+                </AlertDialogDescription>
+              </AlertDialogHeader>
+              <AlertDialogFooter>
+                <AlertDialogCancel>Cancel</AlertDialogCancel>
+                <AlertDialogAction
+                  className="bg-destructive text-white hover:bg-destructive/90 focus-visible:ring-destructive"
+                  onClick={handleDelete}
+                >
+                  Delete page
+                </AlertDialogAction>
+              </AlertDialogFooter>
+            </>
+          ) : (
+            <>
+              <AlertDialogHeader>
+                <AlertDialogTitle>Delete &ldquo;{journalTitle}&rdquo;?</AlertDialogTitle>
+                <AlertDialogDescription>
+                  This cannot be undone. The journal and all of its pages will be
+                  permanently removed.
+                </AlertDialogDescription>
+              </AlertDialogHeader>
+              <AlertDialogFooter>
+                <AlertDialogCancel>Cancel</AlertDialogCancel>
+                <AlertDialogAction
+                  className="bg-destructive text-white hover:bg-destructive/90 focus-visible:ring-destructive"
+                  onClick={handleDelete}
+                >
+                  Delete
+                </AlertDialogAction>
+              </AlertDialogFooter>
+            </>
+          )}
         </AlertDialogContent>
       </AlertDialog>
     </Dialog>
