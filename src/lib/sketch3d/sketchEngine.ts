@@ -115,6 +115,8 @@ interface ReorderState {
   grabX: number; // pointer x at press
   bookX: number; // book x at press
   moved: boolean;
+  /** Escape-cancelled: the book glides back to its slot, then the state clears */
+  returning: boolean;
 }
 
 export class SketchEngine {
@@ -554,6 +556,22 @@ export class SketchEngine {
 
   isPageZoomed(): boolean {
     return !!this.pageZoom?.active;
+  }
+
+  /**
+   * Escape-cancel an in-progress shelf drag-to-reorder: the lifted book
+   * glides back into its original slot and the shelf reflows to the old order.
+   */
+  cancelReorder(): void {
+    if (this.reorderTimer != null) {
+      window.clearTimeout(this.reorderTimer);
+      this.reorderTimer = null;
+    }
+    const r = this.reorder;
+    if (!r || r.returning) return;
+    r.returning = true;
+    r.currentIndex = r.startIndex;
+    this.dragging = false;
   }
 
   /** Camera target hovering the chosen page so the page overfills the view. */
@@ -1431,10 +1449,12 @@ export class SketchEngine {
       const slots = this.order.map(() => -1);
       const reorder = this.reorder;
       if (reorder?.active) {
+        // while returning, the gap slides back to the book's original slot
+        const gapIdx = reorder.returning ? reorder.startIndex : reorder.currentIndex;
         let free = 0;
         this.order.forEach((id, j) => {
           if (id === reorder.id) return;
-          while (free === reorder.currentIndex) free += 1;
+          while (free === gapIdx) free += 1;
           slots[j] = free;
           free += 1;
         });
@@ -1448,8 +1468,27 @@ export class SketchEngine {
           : (this.reorder?.active ? slots[i] : i) - this.scroll;
         const root = entry.obj.root;
         if (dragging && this.reorder) {
+          const r = this.reorder;
+          if (r.returning) {
+            // escape-cancelled: glide back into the original slot, then hand
+            // over to the normal shelf loop once converged
+            const slotX = (r.startIndex - this.scroll) * SHELF_SPACING;
+            r.bookX = lerp(r.bookX, slotX, 0.22);
+            root.position.x = r.bookX;
+            root.position.z = lerp(root.position.z, -Math.min(0.55, Math.abs(fromCenter) * 0.22), 0.2);
+            root.position.y = lerp(root.position.y, SHELF_BASE_Y + SELECT_LIFT, 0.16);
+            root.rotation.y = lerp(root.rotation.y, 0, 0.18);
+            root.rotation.z = lerp(root.rotation.z, 0, 0.18);
+            root.scale.setScalar(lerp(root.scale.x, 1, 0.16));
+            entry.blob.position.set(root.position.x, 0.004, root.position.z + 0.05);
+            entry.blob.scale.set(1.5, 1.7, 1);
+            const bm = entry.blob.material as THREE.MeshBasicMaterial;
+            bm.opacity = lerp(bm.opacity, 0.55, 0.16);
+            if (Math.abs(r.bookX - slotX) < 0.012) this.reorder = null;
+            return;
+          }
           // lifted, slightly enlarged, gently wobbling — follows the pointer
-          root.position.x = lerp(root.position.x, this.reorder.bookX, 0.35);
+          root.position.x = lerp(root.position.x, r.bookX, 0.35);
           root.position.z = lerp(root.position.z, 0.85, 0.2);
           root.position.y = lerp(root.position.y, SHELF_BASE_Y + 0.42, 0.2);
           root.rotation.y = lerp(root.rotation.y, Math.sin(now * 6) * 0.06, 0.2);
@@ -1461,7 +1500,12 @@ export class SketchEngine {
           bm.opacity = lerp(bm.opacity, 0.6, 0.2);
           return;
         }
-        root.position.x = fromCenter * SHELF_SPACING;
+        if (this.reorder?.active) {
+          // neighbors ease between slots so the reflow reads as a glide
+          root.position.x = lerp(root.position.x, fromCenter * SHELF_SPACING, 0.3);
+        } else {
+          root.position.x = fromCenter * SHELF_SPACING;
+        }
         root.position.z = -Math.min(0.55, Math.abs(fromCenter) * 0.22);
         const sway = Math.sin(now * 0.7 + i * 2.1) * 0.02;
         root.rotation.y = Math.max(-0.45, Math.min(0.45, -fromCenter * 0.16 - this.dragVelocity * 2.4 + sway));
@@ -1619,6 +1663,7 @@ export class SketchEngine {
                 grabX: this.dragLastX,
                 bookX: (idx - this.scroll) * SHELF_SPACING,
                 moved: false,
+                returning: false,
               };
               playTap();
             }
@@ -1643,14 +1688,26 @@ export class SketchEngine {
     this.dragLastY = e.clientY;
     this.dragMoved += Math.abs(dx) + Math.abs(dy);
     if (this.reorder?.active) {
-      // drag the lifted book; its slot follows the pointer position
       const r = this.reorder;
-      r.bookX += dx * 0.011;
-      r.moved = true;
-      r.currentIndex = Math.max(
-        0,
-        Math.min(this.order.length - 1, Math.round(r.bookX / SHELF_SPACING + this.scroll)),
-      );
+      if (!r.returning) {
+        // drag the lifted book; its slot follows the pointer position.
+        // rubber-band: free movement inside the slot range, damped overshoot
+        // past the ends so the first/last book can't be flung offscreen.
+        const minX = (0 - this.scroll) * SHELF_SPACING;
+        const maxX = (this.order.length - 1 - this.scroll) * SHELF_SPACING;
+        const over = SHELF_SPACING * 0.55;
+        // 1:1 inside the slot range, damped in the rubber zone, hard stop at ±0.55 slot
+        const outside = r.bookX < minX || r.bookX > maxX;
+        let x = r.bookX + dx * 0.011 * (outside ? 0.3 : 1);
+        if (x < minX - over) x = minX - over;
+        else if (x > maxX + over) x = maxX + over;
+        r.bookX = x;
+        r.moved = true;
+        r.currentIndex = Math.max(
+          0,
+          Math.min(this.order.length - 1, Math.round(r.bookX / SHELF_SPACING + this.scroll)),
+        );
+      }
       return;
     }
     if (this.mode === 'shelf') {
@@ -1677,9 +1734,12 @@ export class SketchEngine {
       window.clearTimeout(this.reorderTimer);
       this.reorderTimer = null;
     }
-    // commit / cancel shelf drag-to-reorder
     if (this.reorder?.active) {
       const r = this.reorder;
+      if (r.returning) {
+        // escape-cancelled: let the glide-back finish in the shelf loop
+        return;
+      }
       this.reorder = null;
       if (r.currentIndex !== r.startIndex) {
         // persist the new order: move id from startIndex to currentIndex

@@ -58,6 +58,8 @@ export default function SketchApp() {
   /** the 3D camera is zoomed into a fullscreen page (chrome hidden) */
   const [pageZoomed, setPageZoomed] = useState(false);
   const [hintSeen, setHintSeen] = useState(false);
+  /** shelf gesture tip (swipe to browse · hold to rearrange) */
+  const [shelfHintSeen, setShelfHintSeen] = useState(false);
 
   const [gridOpen, setGridOpen] = useState(false);
   /** 3D table-top overview (engine 'grid' mode) — shelf only */
@@ -331,6 +333,7 @@ export default function SketchApp() {
         });
         if (!res.ok) throw new Error();
         toast('Shelf reordered');
+        setShelfHintSeen(true);
       } catch {
         toast('Could not reorder', 'destructive');
         void refreshJournals();
@@ -783,6 +786,9 @@ export default function SketchApp() {
         }
       } else if (grid3d) {
         if (e.key === 'Escape' || e.key === 'g') engineRef.current?.exitGrid();
+      } else if (view === 'shelf' && e.key === 'Escape') {
+        // Esc while dragging a book = cancel the reorder (book glides back)
+        engineRef.current?.cancelReorder();
       }
     };
     window.addEventListener('keydown', onKey);
@@ -795,6 +801,13 @@ export default function SketchApp() {
     const t = window.setTimeout(() => setHintSeen(true), 7000);
     return () => window.clearTimeout(t);
   }, [view, hintSeen]);
+
+  /* shelf gesture tip shows once per session, then fades */
+  useEffect(() => {
+    if (view !== 'shelf' || grid3d || shelfHintSeen) return;
+    const t = window.setTimeout(() => setShelfHintSeen(true), 6000);
+    return () => window.clearTimeout(t);
+  }, [view, grid3d, shelfHintSeen]);
 
   /* ------------------------------------------------------------ */
   /* render                                                        */
@@ -974,6 +987,17 @@ export default function SketchApp() {
           onClick={() => setHintSeen(true)}
         >
           Tap a page center to draw · edges to flip
+        </button>
+      )}
+
+      {/* shelf gesture tip (swipe to browse · hold a book to rearrange) */}
+      {view === 'shelf' && !grid3d && !shelfHintSeen && (
+        <button
+          type="button"
+          className="absolute bottom-24 left-1/2 z-30 -translate-x-1/2 rounded-full bg-black/30 px-4 py-2 text-xs font-medium text-white/90 backdrop-blur-sm transition hover:bg-black/45 md:bottom-28"
+          onClick={() => setShelfHintSeen(true)}
+        >
+          Swipe to browse · hold a book to rearrange
         </button>
       )}
 
