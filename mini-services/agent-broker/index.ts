@@ -114,16 +114,32 @@ const httpServer = createServer((req, res) => {
       chunks.push(c);
     });
     req.on('end', () => {
-      let body: { sessionId?: string; command?: string; params?: Record<string, unknown>; timeoutMs?: number };
+      let body: { sessionId?: string; command?: string; params?: Record<string, unknown>; args?: unknown; timeoutMs?: number };
       try {
         body = JSON.parse(Buffer.concat(chunks).toString('utf8') || '{}');
       } catch {
         send(400, JSON.stringify({ ok: false, error: 'invalid JSON body' }));
         return;
       }
-      const { command, params, sessionId, timeoutMs } = body;
+      const { command, sessionId, timeoutMs } = body;
       if (!command || typeof command !== 'string') {
         send(400, JSON.stringify({ ok: false, error: 'missing "command" string' }));
+        return;
+      }
+      // Guard against malformed bodies: `params` is canonical; legacy `args` is an alias.
+      let params = body.params;
+      if (params === undefined && body.args !== undefined) {
+        if (body.args !== null && typeof body.args === 'object' && !Array.isArray(body.args)) {
+          params = body.args as Record<string, unknown>;
+        } else {
+          send(400, JSON.stringify({ ok: false, error: "'args' must be an object of command parameters (or use 'params')" }));
+          return;
+        }
+      } else if (params !== undefined && body.args !== undefined) {
+        send(400, JSON.stringify({ ok: false, error: "ambiguous body: both 'params' and 'args' provided — send 'params' only" }));
+        return;
+      } else if (params !== undefined && (params === null || typeof params !== 'object' || Array.isArray(params))) {
+        send(400, JSON.stringify({ ok: false, error: "'params' must be an object" }));
         return;
       }
 
