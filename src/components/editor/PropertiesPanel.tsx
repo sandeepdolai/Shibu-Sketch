@@ -387,6 +387,14 @@ function CameraSection({ obj }: { obj: ObjectInfo }) {
           {isActive ? 'Active camera' : 'Set active'}
         </Button>
       </div>
+      <Button
+        size="sm"
+        variant="outline"
+        className="h-7 w-full text-xs"
+        onClick={() => void runCommand('viewport_through_camera', { objectId: obj.id })}
+      >
+        View through
+      </Button>
       <div className="space-y-1">
         <div className="flex items-center justify-between">
           <span className="text-xs text-muted-foreground">FOV</span>

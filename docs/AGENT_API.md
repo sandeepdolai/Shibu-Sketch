@@ -128,6 +128,7 @@ Presets: `paper`, `cardboard`, `leather`, `plastic`, `wood`, `metal`, `glass`, `
 | `update_camera` | `objectId`, `fov?`, `zoom?`, `position?`, `lookAt?` | `{}` |
 | `set_active_camera` | `objectId` or `null` (viewport default) | `{}` |
 | `set_viewport_camera` | `preset`: front\|back\|left\|right\|top\|bottom\|iso, `fitObject?` | `{}` |
+| `viewport_through_camera` | `objectId` (scene camera) | `{}` — moves the viewport to that camera's pose |
 | `set_environment` | `background?`, `backgroundColor?`, `ground?`, `groundColor?`, `envIntensity?` | `{}` |
 
 ### Animation
@@ -142,6 +143,7 @@ Presets: `paper`, `cardboard`, `leather`, `plastic`, `wood`, `metal`, `glass`, `
 | `remove_track` | `trackId` | `{}` |
 | `clear_animation` | `objectId?` | `{}` |
 | `create_page_turn` | `objectId` (page mesh), `startFrame?`, `endFrame?`, `direction?` 1\|-1, `curvature?`, `easing?` | `{ trackId }` |
+| `create_book_flip_sequence` | `objectId` (book group), `fromIndex?`, `toIndex?` (inclusive), `startFrame?`, `framesPerPage?=16`, `gapFrames?=4`, `direction?`, `curvature?`, `easing?` | `{ tracks[], pagesFlipped, endFrame }` — batch page turns |
 | `create_book_open` | `objectId` (book group), `startFrame?`, `endFrame?`, `angleDeg?` (default 180), `easing?` | `{ trackId }` |
 | `play_animation` | `from?`, `to?` | `{}` |
 | `pause_animation` | – | `{}` |

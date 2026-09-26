@@ -28,6 +28,11 @@ function getSessionId(): string {
   }
 }
 
+const READ_ONLY_COMMANDS = new Set([
+  'list_commands', 'help', 'get_stats', 'inspect_scene', 'inspect_object',
+  'inspect_animation', 'list_material_presets', 'list_projects', 'get_mesh',
+]);
+
 export class AgentBridge implements EngineBridge {
   private socket: Socket | null = null;
   private engine: Engine;
@@ -88,6 +93,16 @@ export class AgentBridge implements EngineBridge {
   private async handleCommand(msg: { commandId: string; command: string; params?: Record<string, unknown> }): Promise<void> {
     let response: { ok: boolean; result?: unknown; error?: string; code?: string };
     const started = performance.now();
+
+    // surface agent activity in the UI (skip read-only chatter)
+    if (!READ_ONLY_COMMANDS.has(msg.command)) {
+      const st = useEditor.getState();
+      const text = `Agent: ${msg.command}`;
+      if (st.toasts[st.toasts.length - 1]?.text !== text) {
+        st.pushToast(true, text);
+      }
+    }
+
     try {
       // lazy import to avoid a router<->engine circular import at module load
       const { executeCommand } = await import('../commands/router');
@@ -95,6 +110,9 @@ export class AgentBridge implements EngineBridge {
       response = res;
     } catch (e) {
       response = { ok: false, error: e instanceof Error ? e.message : String(e), code: 'EXEC_ERROR' };
+    }
+    if (!response.ok) {
+      useEditor.getState().pushToast(false, `Agent ${msg.command} failed: ${response.error ?? 'unknown'}`);
     }
     const payload = {
       commandId: msg.commandId,

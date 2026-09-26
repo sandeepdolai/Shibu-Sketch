@@ -86,14 +86,29 @@ function Scrubber({ className }: { className?: string }) {
       onPointerUp={onPointerUp}
       onPointerCancel={onPointerUp}
     >
-      {/* ticks */}
-      {[0, 0.25, 0.5, 0.75, 1].map((p) => (
+      {/* ticks — minor every 5%, labeled majors */}
+      {Array.from({ length: 21 }, (_, i) => i * 5).map((p) => (
         <div
           key={p}
-          className="absolute top-0 h-full w-px bg-border/50"
-          style={{ left: `${p * 100}%` }}
+          className={cn(
+            'absolute top-0 w-px',
+            p % 25 === 0 ? 'h-2.5 bg-border' : 'h-1.5 bg-border/40',
+          )}
+          style={{ left: `${p}%` }}
         />
       ))}
+      {[0, 0.25, 0.5, 0.75, 1].map((p) => {
+        const f = Math.round(anim.start + p * span);
+        return (
+          <span
+            key={p}
+            className="pointer-events-none absolute top-0.5 font-mono text-[8px] tabular-nums text-muted-foreground/70"
+            style={{ left: `calc(${p * 100}% + 3px)` }}
+          >
+            {f}
+          </span>
+        );
+      })}
 
       {/* tracks */}
       <div className="pointer-events-none absolute inset-0">

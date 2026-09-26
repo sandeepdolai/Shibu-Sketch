@@ -3,11 +3,12 @@
 /**
  * ACAN3D — application shell. Owns the overall editor layout:
  * top bar, viewport, desktop side panel (tabs), timeline, status bar,
- * mobile bottom sheet and toasts.
+ * mobile bottom sheet and toasts. Also binds desktop keyboard shortcuts.
  */
 
 import * as React from 'react';
 import { Tabs, TabsContent, TabsList, TabsTrigger } from '@/components/ui/tabs';
+import { runCommand, useEditor } from '@/lib/engine/store';
 
 import { MaterialsTab } from './MaterialsTab';
 import { MobilePanel } from './MobilePanel';
@@ -19,7 +20,90 @@ import { Toasts } from './Toasts';
 import { TopBar } from './TopBar';
 import { ViewportCanvas } from './ViewportCanvas';
 
+const GIZMO_KEYS: Record<string, 'translate' | 'rotate' | 'scale'> = {
+  g: 'translate',
+  r: 'rotate',
+  s: 'scale',
+};
+
+function useKeyboardShortcuts() {
+  React.useEffect(() => {
+    const onKey = (e: KeyboardEvent) => {
+      const target = e.target as HTMLElement | null;
+      if (target && (target.tagName === 'INPUT' || target.tagName === 'TEXTAREA' || target.isContentEditable)) return;
+      const mod = e.ctrlKey || e.metaKey;
+      const key = e.key.toLowerCase();
+
+      // undo / redo
+      if (mod && key === 'z' && !e.shiftKey) {
+        e.preventDefault();
+        void runCommand('undo');
+        return;
+      }
+      if (mod && (key === 'y' || (key === 'z' && e.shiftKey))) {
+        e.preventDefault();
+        void runCommand('redo');
+        return;
+      }
+      if (mod && key === 'd') {
+        e.preventDefault();
+        const sel = useEditor.getState().selection;
+        if (sel[0]) void runCommand('duplicate_object', { objectId: sel[0] });
+        return;
+      }
+      if (mod) return;
+
+      // gizmo modes
+      if (GIZMO_KEYS[key]) {
+        void runCommand('set_gizmo', { mode: GIZMO_KEYS[key] });
+        return;
+      }
+      switch (key) {
+        case 'f': {
+          const sel = useEditor.getState().selection;
+          void runCommand('frame_object', sel[0] ? { objectId: sel[0] } : {});
+          break;
+        }
+        case 'x':
+        case 'delete': {
+          const sel = useEditor.getState().selection;
+          if (sel.length > 0) void runCommand('delete_object', { objectIds: sel });
+          break;
+        }
+        case 'escape': {
+          const edit = useEditor.getState().edit;
+          if (edit.active) void runCommand('set_edit_mode', { objectId: null });
+          else void runCommand('select_object', {});
+          break;
+        }
+        case ' ': {
+          e.preventDefault();
+          const anim = useEditor.getState().anim;
+          void runCommand(anim.playing ? 'pause_animation' : 'play_animation');
+          break;
+        }
+        case 'arrowright': {
+          const anim = useEditor.getState().anim;
+          void runCommand('set_frame', { frame: Math.min(anim.end, Math.round(anim.current) + 1) });
+          break;
+        }
+        case 'arrowleft': {
+          const anim = useEditor.getState().anim;
+          void runCommand('set_frame', { frame: Math.max(anim.start, Math.round(anim.current) - 1) });
+          break;
+        }
+        default:
+          break;
+      }
+    };
+    window.addEventListener('keydown', onKey);
+    return () => window.removeEventListener('keydown', onKey);
+  }, []);
+}
+
 export function EditorShell() {
+  useKeyboardShortcuts();
+
   return (
     <div className="flex h-[100dvh] w-full flex-col overflow-hidden bg-background text-foreground">
       <TopBar />

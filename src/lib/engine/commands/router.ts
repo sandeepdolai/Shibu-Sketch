@@ -338,17 +338,42 @@ defCommand('duplicate_object', 'Duplicate an object (and children) with an optio
   const count = q.count ?? 1;
   engine.pushUndo();
   const created: string[] = [];
+
+  // source descendants that carry acan registration, in deterministic DFS order
+  const srcNodes: THREE.Object3D[] = [];
+  src.traverse((n) => {
+    if (n !== src && (n.userData.acan as ACANUserData | undefined)?.id) srcNodes.push(n);
+  });
+
   for (let i = 0; i < count; i++) {
     const clone = src.clone(true);
+
+    // deep-clone geometries so duplicated meshes are independently editable,
+    // and normalize userData (BufferGeometry.clone() JSON-stringifies it,
+    // turning Float32Array rest positions into plain objects)
     clone.traverse((child) => {
       const mesh = child as THREE.Mesh;
       if (mesh.isMesh && mesh.geometry) {
         mesh.geometry = mesh.geometry.clone();
-        const ud = child.userData.acan as ACANUserData | undefined;
-        if (ud) child.userData.acan = { ...ud, id: '' };
+        const rest = mesh.geometry.userData.restPositions;
+        if (rest) {
+          try {
+            mesh.geometry.userData.restPositions = rest instanceof Float32Array
+              ? new Float32Array(rest)
+              : Float32Array.from(Object.values(rest as Record<string, number>));
+          } catch {
+            delete mesh.geometry.userData.restPositions;
+          }
+        }
+        if (mesh.geometry.index && mesh.geometry.index.count === 0) {
+          const count2 = mesh.geometry.getAttribute('position')?.count ?? 0;
+          const identity = new Uint32Array(count2);
+          for (let k = 0; k < count2; k++) identity[k] = k;
+          mesh.geometry.setIndex(new THREE.BufferAttribute(identity, 1));
+        }
       }
-      if (child.userData.acan) child.userData.acan = { ...(child.userData.acan as ACANUserData), id: '' };
     });
+
     const srcUd = src.userData.acan as ACANUserData;
     const name = engine.nextName(srcUd.name);
     clone.position.x += (q.offset?.x ?? 0.1) * (i + 1);
@@ -356,7 +381,40 @@ defCommand('duplicate_object', 'Duplicate an object (and children) with an optio
     clone.position.z += (q.offset?.z ?? 0) * (i + 1);
     const { id: _omit, ...srcUdNoId } = srcUd;
     const id = engine.register(clone, { ...srcUdNoId, name }, undefined, null);
-    // register children that were registered on the source
+
+    // re-register every descendant that was registered on the source (same DFS order)
+    const cloneNodes: THREE.Object3D[] = [];
+    clone.traverse((n) => {
+      if (n !== clone && (n.userData.acan as ACANUserData | undefined)) cloneNodes.push(n);
+    });
+    const oldToNew = new Map<string, string>([[q.objectId, id]]);
+    if (cloneNodes.length === srcNodes.length) {
+      for (let k = 0; k < srcNodes.length; k++) {
+        const oldUd = srcNodes[k].userData.acan as ACANUserData;
+        const oldId = oldUd.id;
+        const cloneNode = cloneNodes[k];
+        // parent = mapped new parent id (or the clone root)
+        let parentId = id;
+        let pp: THREE.Object3D | null = srcNodes[k].parent;
+        while (pp) {
+          const pid = (pp.userData.acan as ACANUserData | undefined)?.id;
+          const mapped = pid ? oldToNew.get(pid) : undefined;
+          if (mapped) {
+            parentId = mapped;
+            break;
+          }
+          pp = pp.parent;
+        }
+        const { id: _drop, ...restUd } = oldUd;
+        const newId = engine.register(cloneNode, { ...restUd, name: oldUd.name }, undefined, parentId);
+        oldToNew.set(oldId, newId);
+        // carry material bindings
+        const mats = engine.objectMaterials.get(oldId);
+        if (mats) engine.objectMaterials.set(newId, [...mats]);
+        void cloneNode;
+      }
+    }
+
     const mats = engine.objectMaterials.get(q.objectId);
     if (mats) engine.objectMaterials.set(id, [...mats]);
     created.push(id);
@@ -948,6 +1006,26 @@ defCommand('toggle_viewport_ortho', 'Switch viewport between perspective and ort
   return ok({ ortho: engine.activeViewport === 'ortho' });
 });
 
+defCommand('viewport_through_camera', 'Move the viewport camera to a scene camera pose (see through it).', z.object({
+  objectId: z.string(),
+}) as unknown as z.ZodType<Record<string, unknown>>, (engine, p) => {
+  const { objectId } = p as { objectId: string };
+  const obj = requireObject(engine, objectId);
+  const cam = obj as THREE.PerspectiveCamera & THREE.OrthographicCamera;
+  if (!(cam as unknown as { isCamera?: boolean }).isCamera) return err('not a camera', 'VALIDATION');
+  cam.updateMatrixWorld(true);
+  engine.perspCam.position.copy(cam.position);
+  engine.perspCam.quaternion.copy(cam.quaternion);
+  engine.orthoCam.position.copy(cam.position);
+  engine.orthoCam.quaternion.copy(cam.quaternion);
+  const target = new THREE.Vector3(0, 0.1, 0).applyMatrix4(cam.matrixWorld);
+  const forward = new THREE.Vector3(0, 0, -1).applyQuaternion(cam.quaternion);
+  engine.controls.target.copy(cam.position.clone().add(forward.multiplyScalar(0.6)));
+  void target;
+  engine.controls.update();
+  return ok({ position: cam.position.toArray() });
+});
+
 defCommand('frame_object', 'Frame an object (or the whole scene / current selection).', z.object({
   objectId: z.string().optional(),
 }) as unknown as z.ZodType<Record<string, unknown>>, (engine, p) => {
@@ -1094,6 +1172,56 @@ defCommand('create_page_turn', 'Create a procedural page-turn track for a page m
   engine.evaluateAt(engine.anim.current, true);
   engine.syncStore(true);
   return ok({ trackId: track.id });
+});
+
+defCommand('create_book_flip_sequence', 'Queue page-turns for a range of pages of a book, one after another (agent-friendly batch).', z.object({
+  objectId: z.string(), // book group id
+  fromIndex: z.number().int().min(0).optional(),
+  toIndex: z.number().int().min(0).optional(), // inclusive; default: top page
+  startFrame: z.number().int().min(0).default(0),
+  framesPerPage: z.number().int().min(2).max(300).default(16),
+  gapFrames: z.number().int().min(0).max(120).default(4),
+  direction: z.union([z.literal(1), z.literal(-1)]).default(1),
+  curvature: z.number().min(0).max(1.5).default(0.6),
+  easing: easing.default('easeInOut'),
+}) as unknown as z.ZodType<Record<string, unknown>>, (engine, p) => {
+  const q = p as { objectId: string; fromIndex?: number; toIndex?: number; startFrame: number; framesPerPage: number; gapFrames: number; direction: 1 | -1; curvature: number; easing: Easing };
+  requireObject(engine, q.objectId);
+
+  // collect registered pages of this book, sorted by index
+  const pages: Array<{ id: string; index: number }> = [];
+  for (const [oid, obj] of engine.objectMap) {
+    const ud = obj.userData.acan as ACANUserData;
+    if (ud.pageMeta && ud.pageMeta.bookId === q.objectId) pages.push({ id: oid, index: ud.pageMeta.index });
+  }
+  if (pages.length === 0) return err(`book ${q.objectId} has no registered pages`, 'NOT_FOUND');
+  pages.sort((a, b) => a.index - b.index);
+
+  // default: top page only; a from>to range flips back (direction handled by caller)
+  let lo = q.fromIndex ?? pages.length - 1;
+  let hi = q.toIndex ?? pages.length - 1;
+  lo = Math.max(0, Math.min(pages.length - 1, lo));
+  hi = Math.max(0, Math.min(pages.length - 1, hi));
+  const seq = lo <= hi ? pages.slice(lo, hi + 1) : pages.slice(hi, lo + 1).reverse();
+
+  let frame = q.startFrame;
+  const tracks: Array<{ trackId: string; pageId: string; startFrame: number; endFrame: number }> = [];
+  for (const page of seq) {
+    const end = frame + q.framesPerPage;
+    const trackId = `trk_turn_${page.index}_${frame}`;
+    engine.anim.tracks = engine.anim.tracks.filter((t) => t.id !== trackId);
+    engine.anim.tracks.push({
+      id: trackId, type: 'pageTurn', objectId: page.id,
+      startFrame: frame, endFrame: end,
+      direction: q.direction, curvature: q.curvature, easing: q.easing,
+    });
+    tracks.push({ trackId, pageId: page.id, startFrame: frame, endFrame: end });
+    frame = end + q.gapFrames;
+  }
+  engine.anim.end = Math.max(engine.anim.end, frame - q.gapFrames);
+  engine.evaluateAt(engine.anim.current, true);
+  engine.syncStore(true);
+  return ok({ tracks, pagesFlipped: seq.length, endFrame: frame - q.gapFrames });
 });
 
 defCommand('create_book_open', 'Create a book-open track (rotates the front cover pivot around the spine).', z.object({
