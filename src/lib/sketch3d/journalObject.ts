@@ -58,6 +58,8 @@ export interface JournalObject {
   coverArtMesh: THREE.Mesh;
   leftWell: THREE.Mesh;
   rightWell: THREE.Mesh;
+  /** per-sheet top-face content planes (visible only during open/close bloom) */
+  sheetFaces: THREE.Mesh[];
   tapZoneL: THREE.Mesh;
   tapZoneR: THREE.Mesh;
   flipShadow: THREE.Mesh;
@@ -126,6 +128,8 @@ export function buildJournal(opts: BuildJournalOpts): JournalObject {
   const slotY = (i: number, left: boolean): number =>
     left ? COVER_T + (i + 0.5) * SHEET_T : stackTop - (i + 0.5) * SHEET_T;
   const sheets: THREE.Mesh[] = [];
+  const sheetFaces: THREE.Mesh[] = [];
+  const faceGeo = track(new THREE.PlaneGeometry(W * 0.985, H * 0.985));
   for (let i = 0; i < S; i++) {
     const m = new THREE.Mesh(slabGeo, [paperMat, edgeMat]);
     m.position.y = slotY(i, false);
@@ -133,6 +137,24 @@ export function buildJournal(opts: BuildJournalOpts): JournalObject {
     m.receiveShadow = true;
     offset.add(m);
     sheets.push(m);
+    // content face on top of each slab (rides the sheet's rotation; only
+    // shown while the book blooms open / gathers closed, like the reference)
+    const faceMat = track(
+      new THREE.MeshStandardMaterial({
+        color: paperColor,
+        map: textures.getPageTexture(2 * i + 1) ?? getPaperTexture(),
+        roughness: 0.92,
+        side: THREE.DoubleSide,
+      }),
+    );
+    const face = new THREE.Mesh(faceGeo, faceMat);
+    face.rotation.x = -HALF_PI;
+    face.position.set(W / 2, SHEET_T + 0.0006, 0);
+    face.visible = false;
+    face.castShadow = false;
+    face.receiveShadow = false;
+    m.add(face);
+    sheetFaces.push(face);
   }
 
   /* -------- front cover on a pivot at the spine -------- */
@@ -276,6 +298,7 @@ export function buildJournal(opts: BuildJournalOpts): JournalObject {
     coverArtMesh,
     leftWell,
     rightWell,
+    sheetFaces,
     tapZoneL,
     tapZoneR,
     flipShadow,

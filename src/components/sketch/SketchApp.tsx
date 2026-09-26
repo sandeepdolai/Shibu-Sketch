@@ -55,6 +55,8 @@ export default function SketchApp() {
   const [detail, setDetail] = useState<JournalDetailDTO | null>(null);
   const [spread, setSpread] = useState(0);
   const [editTarget, setEditTarget] = useState<EditTarget | null>(null);
+  /** the 3D camera is zoomed into a fullscreen page (chrome hidden) */
+  const [pageZoomed, setPageZoomed] = useState(false);
   const [hintSeen, setHintSeen] = useState(false);
 
   const [gridOpen, setGridOpen] = useState(false);
@@ -236,6 +238,12 @@ export default function SketchApp() {
         if (cur) saveProgressRef.current(cur.id, k);
       },
       onEditPage: (pageIndex) => {
+        // tap a page center -> zoom the 3D camera into it (fullscreen);
+        // the drawing editor opens once the zoom completes (onZoomDone)
+        engineRef.current?.zoomToPage(pageIndex);
+      },
+      onZoomChange: (active) => setPageZoomed(active),
+      onZoomDone: (pageIndex) => {
         const cur = detailRef.current;
         if (!cur) return;
         const page = cur.pages[pageIndex];
@@ -735,7 +743,11 @@ export default function SketchApp() {
       if (view === 'open') {
         if (e.key === 'ArrowRight') engineRef.current?.flipPage(1);
         if (e.key === 'ArrowLeft') engineRef.current?.flipPage(-1);
-        if (e.key === 'Escape') closeJournal();
+        if (e.key === 'Escape') {
+          // zoomed into a page first? Esc steps back out before closing
+          if (engineRef.current?.isPageZoomed()) engineRef.current?.zoomOutPage();
+          else closeJournal();
+        }
       } else if (grid3d) {
         if (e.key === 'Escape' || e.key === 'g') engineRef.current?.exitGrid();
       }
@@ -827,7 +839,7 @@ export default function SketchApp() {
         </div>
       )}
 
-      {/* top chrome */}
+      {/* top chrome (fades out while a page is zoomed fullscreen) */}
       {view === 'shelf' || view === 'closing' ? (
         <ShelfTopBar
           journalCount={journals.length}
@@ -846,18 +858,28 @@ export default function SketchApp() {
           onToggleSound={toggleSound}
         />
       ) : (
-        <OpenTopBar
-          onBack={closeJournal}
-          onGrid={() => setGridOpen(true)}
-          onSearch={() => setSearchOpen(true)}
-          onMenu={() => setMenuOpen(true)}
-          soundMuted={soundMuted}
-          onToggleSound={toggleSound}
-        />
+        <div
+          className={`transition-opacity duration-300 ${
+            pageZoomed ? 'pointer-events-none opacity-0' : 'opacity-100'
+          }`}
+        >
+          <OpenTopBar
+            onBack={closeJournal}
+            onGrid={() => setGridOpen(true)}
+            onSearch={() => setSearchOpen(true)}
+            onMenu={() => setMenuOpen(true)}
+            soundMuted={soundMuted}
+            onToggleSound={toggleSound}
+          />
+        </div>
       )}
 
       {/* top-center page dots / menu */}
-      <div className="pointer-events-none absolute inset-x-0 top-2.5 z-30 flex justify-center md:top-3">
+      <div
+        className={`pointer-events-none absolute inset-x-0 top-2.5 z-30 flex justify-center transition-opacity duration-300 md:top-3 ${
+          pageZoomed ? 'opacity-0' : 'opacity-100'
+        }`}
+      >
         {view === 'open' && detail ? (
           <PageDots current={spread + 1} total={spreadCount} />
         ) : (
@@ -873,7 +895,11 @@ export default function SketchApp() {
       </div>
 
       {/* title block */}
-      <div className="pointer-events-none absolute inset-x-0 top-16 z-20 flex flex-col items-center gap-1 md:top-20">
+      <div
+        className={`pointer-events-none absolute inset-x-0 top-16 z-20 flex flex-col items-center gap-1 transition-opacity duration-300 md:top-20 ${
+          pageZoomed ? 'opacity-0' : 'opacity-100'
+        }`}
+      >
         {view === 'open' && detail ? (
           <TitleBlock title={detail.title} pageCount={detail.pages.length} mode="open" />
         ) : grid3d && view === 'shelf' ? (
@@ -902,13 +928,13 @@ export default function SketchApp() {
           onChange={(v) =>
             engineRef.current?.setSpread(Math.round(v * (spreadCount - 1)))
           }
-          visible={view === 'open'}
+          visible={view === 'open' && !pageZoomed}
           label="Jump to page"
         />
       )}
 
       {/* hint chip */}
-      {view === 'open' && !hintSeen && (
+      {view === 'open' && !hintSeen && !pageZoomed && (
         <button
           type="button"
           className="absolute bottom-24 left-1/2 z-30 -translate-x-1/2 rounded-full bg-black/35 px-4 py-2 text-xs font-medium text-white/90 backdrop-blur-sm transition hover:bg-black/50 md:bottom-28"
@@ -918,35 +944,41 @@ export default function SketchApp() {
         </button>
       )}
 
-      {/* bottom dock */}
+      {/* bottom dock (fades out while a page is zoomed fullscreen) */}
       {(view === 'shelf' || view === 'open') && (
-        <BottomDock
-          variant={view === 'open' ? 'open' : 'shelf'}
-          onMore={() => {
-            if (view === 'open' && detail) {
-              setRenameValue(detail.title);
-            }
-            setMenuOpen(true);
-            playTap();
-          }}
-          onShare={() => {
-            setShareOpen(true);
-            playTap();
-          }}
-          onTrash={() => {
-            if (!selected) return;
-            setMenuOpen(true);
-            playTap();
-          }}
-          onPlus={() => {
-            if (view === 'open' && detail) {
-              void addPage();
-            } else {
-              setNewOpen(true);
-            }
-            playTap();
-          }}
-        />
+        <div
+          className={`transition-opacity duration-300 ${
+            pageZoomed ? 'pointer-events-none opacity-0' : 'opacity-100'
+          }`}
+        >
+          <BottomDock
+            variant={view === 'open' ? 'open' : 'shelf'}
+            onMore={() => {
+              if (view === 'open' && detail) {
+                setRenameValue(detail.title);
+              }
+              setMenuOpen(true);
+              playTap();
+            }}
+            onShare={() => {
+              setShareOpen(true);
+              playTap();
+            }}
+            onTrash={() => {
+              if (!selected) return;
+              setMenuOpen(true);
+              playTap();
+            }}
+            onPlus={() => {
+              if (view === 'open' && detail) {
+                void addPage();
+              } else {
+                setNewOpen(true);
+              }
+              playTap();
+            }}
+          />
+        </div>
       )}
 
       {/* overlays & modals */}
@@ -1109,16 +1141,21 @@ export default function SketchApp() {
         </div>
       )}
 
-      {/* drawing overlay */}
+      {/* drawing overlay (opens on top of the fullscreen zoomed page) */}
       {editTarget && detail && (
         <DrawingOverlay
           pageTitle={`${detail.title} · page ${editTarget.pageIndex + 1}`}
           paperColor={detail.paperColor || '#faf8f4'}
           initialContent={editTarget.content}
-          onClose={() => setEditTarget(null)}
+          fullscreen={pageZoomed}
+          onClose={() => {
+            setEditTarget(null);
+            engineRef.current?.zoomOutPage();
+          }}
           onSave={(content) => {
             void savePage(content);
             setEditTarget(null);
+            engineRef.current?.zoomOutPage();
           }}
         />
       )}

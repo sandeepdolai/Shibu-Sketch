@@ -94,6 +94,8 @@ interface DrawingOverlayProps {
   onClose: () => void;
   /** called by Done button (also Ctrl/Cmd+S; Escape-with-dirty offers Save & close) */
   onSave: (content: PageContent) => void;
+  /** opened over the fullscreen zoomed page — paper backdrop, seamless with the 3D page */
+  fullscreen?: boolean;
 }
 
 const DRAW_TOOLS: DrawTool[] = ['pen', 'marker', 'highlighter', 'eraser'];
@@ -208,6 +210,7 @@ export function DrawingOverlay({
   initialContent,
   onClose,
   onSave,
+  fullscreen = false,
 }: DrawingOverlayProps) {
   const [content, setContent] = useState<PageContent>(() => ({
     bg: initialContent.bg,
@@ -850,19 +853,34 @@ export function DrawingOverlay({
   /* ---------------- render ---------------- */
 
   return (
-    <div className="fixed inset-0 z-50 flex select-none flex-col bg-[#343b4d]">
+    <div
+      className={`fixed inset-0 z-50 flex select-none flex-col transition-colors duration-200 ${
+        fullscreen ? '' : 'bg-[#343b4d]'
+      }`}
+      style={fullscreen ? { background: paperColor } : undefined}
+    >
       {/* top bar */}
       <div className="relative z-40 flex items-center justify-between gap-3 px-3 py-2.5">
         <button
           type="button"
           onClick={attemptClose}
           aria-label="Close editor"
-          className="flex h-10 w-10 shrink-0 items-center justify-center rounded-full bg-white/10 text-white transition hover:bg-white/20"
+          className={`flex h-10 w-10 shrink-0 items-center justify-center rounded-full transition ${
+            fullscreen
+              ? 'bg-black/10 text-[#20242e] hover:bg-black/20'
+              : 'bg-white/10 text-white hover:bg-white/20'
+          }`}
         >
           <X className="h-5 w-5" />
         </button>
         <div className="min-w-0 flex-1 text-center">
-          <span className="truncate text-sm font-medium tracking-wide text-white/90">{pageTitle}</span>
+          <span
+            className={`truncate text-sm font-medium tracking-wide ${
+              fullscreen ? 'text-[#20242e]/80' : 'text-white/90'
+            }`}
+          >
+            {pageTitle}
+          </span>
         </div>
         <button
           type="button"
@@ -881,7 +899,9 @@ export function DrawingOverlay({
           ref={pageRef}
           className="relative"
           style={{
-            width: 'min(94vw, calc((100dvh - 200px) / 1.414))',
+            width: fullscreen
+              ? 'min(94vw, calc((100dvh - 128px) / 1.414))'
+              : 'min(94vw, calc((100dvh - 200px) / 1.414))',
             aspectRatio: '1 / 1.414',
             touchAction: 'none',
           }}
