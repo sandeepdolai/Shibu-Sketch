@@ -32,6 +32,9 @@ const HALF_PI = Math.PI / 2;
 const SHELF_SPACING = 1.16;
 const SHELF_BASE_Y = JOURNAL_H / 2 + 0.02;
 const SELECT_LIFT = 0.13;
+/** height the dragged book hovers at during shelf/grid drag-to-reorder —
+ *  pointer raycasts use this plane so the book tracks the cursor exactly */
+const REORDER_LIFT_Y = 0.32;
 /** height the selected book lifts to as the fore-edge bar before blooming */
 const OPEN_LIFT = 0.3;
 /** choreography timings tuned against the reference recording:
@@ -112,11 +115,19 @@ interface ReorderState {
   id: string;
   startIndex: number;
   currentIndex: number;
-  grabX: number; // pointer x at press
-  bookX: number; // book x at press
+  grabX: number; // pointer x at press (screen px on the shelf, world x in grid)
+  bookX: number; // book x at press (world)
   moved: boolean;
   /** Escape-cancelled: the book glides back to its slot, then the state clears */
   returning: boolean;
+  /** grid-mode 2D drag on the table plane */
+  grid: boolean;
+  grabZ: number;
+  bookZ: number;
+  /** grid: book slot (world x/z) when the drag armed — the pointer offset
+   *  is applied to THIS, otherwise the displacement compounds every event */
+  startBookX: number;
+  startBookZ: number;
 }
 
 export class SketchEngine {
@@ -206,6 +217,10 @@ export class SketchEngine {
   constructor(container: HTMLElement, cb: SketchEngineCallbacks) {
     this.container = container;
     this.cb = cb;
+    // debug/QA hook (headless tests read live engine state through it)
+    if (typeof window !== 'undefined') {
+      (window as unknown as Record<string, unknown>).__shibuEngine = this;
+    }
 
     this.renderer = new THREE.WebGLRenderer({ antialias: true, alpha: true });
     this.renderer.setPixelRatio(Math.min(window.devicePixelRatio || 1, 2));
@@ -474,6 +489,11 @@ export class SketchEngine {
     return this.mode === 'grid';
   }
 
+  /** True while a shelf/grid drag-to-reorder is mid-drag (Escape cancels). */
+  isReordering(): boolean {
+    return !!this.reorder?.active;
+  }
+
   private gridCols(): number {
     return (this.camera.aspect || 1) >= 0.9 ? 4 : 2;
   }
@@ -514,26 +534,88 @@ export class SketchEngine {
     this.camFov = lerp(this.camFov, cam.fov, 0.1);
 
     const cols = this.gridCols();
+    const rows = this.gridRows();
     const gapX = JOURNAL_W * 1.26;
     const gapZ = JOURNAL_H * 1.12;
+
+    // while reordering, the remaining books fill the slots around the dragged
+    // book's hover index so a gap opens under it (same model as the shelf)
+    const reorder = this.reorder;
+    const slots = this.order.map(() => -1);
+    if (reorder?.active) {
+      const gapIdx = reorder.returning ? reorder.startIndex : reorder.currentIndex;
+      let free = 0;
+      this.order.forEach((id, j) => {
+        if (id === reorder.id) return;
+        while (free === gapIdx) free += 1;
+        slots[j] = free;
+        free += 1;
+      });
+    }
+
     this.order.forEach((id, i) => {
       const entry = this.journals.get(id);
       if (!entry) return;
+      const root = entry.obj.root;
       const col = i % cols;
       const row = Math.floor(i / cols);
-      const x = (col - (cols - 1) / 2) * gapX;
-      const z = (row - (this.gridRows() - 1) / 2) * gapZ + this.gridScroll * gapZ;
-      const root = entry.obj.root;
-      root.position.x = lerp(root.position.x, x, 0.14);
+      const slotX = (col - (cols - 1) / 2) * gapX;
+      const slotZ = (row - (rows - 1) / 2) * gapZ + this.gridScroll * gapZ;
+      const dragging = reorder?.active && reorder.id === id && reorder.grid;
+      const bm = entry.blob.material as THREE.MeshBasicMaterial;
+
+      if (dragging && reorder) {
+        if (reorder.returning) {
+          // escape-cancelled: glide back into the original slot, then hand
+          // over to the normal grid loop once converged
+          reorder.bookX = lerp(reorder.bookX, slotX, 0.22);
+          reorder.bookZ = lerp(reorder.bookZ, slotZ, 0.22);
+          root.position.x = reorder.bookX;
+          root.position.z = reorder.bookZ;
+          root.position.y = lerp(root.position.y, id === this.selectedId ? 0.085 : 0.012, 0.16);
+          root.rotation.y = lerp(root.rotation.y, 0, 0.18);
+          root.rotation.z = lerp(root.rotation.z, 0, 0.18);
+          root.scale.setScalar(lerp(root.scale.x, 1, 0.16));
+          entry.blob.position.set(root.position.x, 0.004, root.position.z + 0.06);
+          entry.blob.scale.set(1.5, 1.7, 1);
+          bm.opacity = lerp(bm.opacity, 0.55, 0.16);
+          if (Math.abs(reorder.bookX - slotX) < 0.012 && Math.abs(reorder.bookZ - slotZ) < 0.012) {
+            this.reorder = null;
+          }
+          return;
+        }
+        // lifted, gently wobbling — follows the pointer over the table
+        root.position.x = lerp(root.position.x, reorder.bookX, 0.35);
+        root.position.z = lerp(root.position.z, reorder.bookZ, 0.35);
+        root.position.y = lerp(root.position.y, REORDER_LIFT_Y, 0.2);
+        root.rotation.y = lerp(root.rotation.y, Math.sin(now * 6) * 0.05, 0.2);
+        root.rotation.z = lerp(root.rotation.z, Math.sin(now * 4.4) * 0.02, 0.2);
+        root.scale.setScalar(lerp(root.scale.x, 1.07, 0.2));
+        entry.blob.position.set(root.position.x, 0.004, root.position.z + 0.06);
+        entry.blob.scale.set(1.7, 1.7, 1);
+        bm.opacity = lerp(bm.opacity, 0.6, 0.2);
+        return;
+      }
+
+      // neighbors ease between slots so the reflow reads as a glide
+      let x = slotX;
+      let z = slotZ;
+      if (reorder?.active && slots[i] >= 0) {
+        const sc = slots[i] % cols;
+        const sr = Math.floor(slots[i] / cols);
+        x = (sc - (cols - 1) / 2) * gapX;
+        z = (sr - (rows - 1) / 2) * gapZ + this.gridScroll * gapZ;
+      }
+      const ease = reorder?.active ? 0.3 : 0.14;
+      root.position.x = lerp(root.position.x, x, ease);
+      root.position.z = lerp(root.position.z, z, ease);
       root.position.y = lerp(root.position.y, id === this.selectedId ? 0.085 : 0.012, 0.14);
-      root.position.z = lerp(root.position.z, z, 0.14);
       root.rotation.y = lerp(root.rotation.y, 0, 0.14);
-      root.rotation.z = lerp(root.rotation.z, 0, 0.14);
       entry.obj.stand.rotation.x = lerp(entry.obj.stand.rotation.x, 0, 0.14);
       this.setSpineFlat(entry.obj, 1);
       entry.blob.visible = true;
       entry.blob.position.set(root.position.x, 0.004, root.position.z + 0.06);
-      const bm = entry.blob.material as THREE.MeshBasicMaterial;
+      entry.blob.scale.set(1.5, 1.7, 1);
       bm.opacity = lerp(bm.opacity, id === this.selectedId ? 0.55 : 0.3, 0.14);
       // subtle idle breathing so the grid feels alive
       root.rotation.z = Math.sin(now * 0.6 + i * 1.7) * 0.004;
@@ -1646,25 +1728,56 @@ export class SketchEngine {
       this.openDragActive = true;
       this.openDragX = 0;
     }
-    // shelf: long-press arms drag-to-reorder
-    if (this.mode === 'shelf' && !this.reorder?.active && this.selectedId) {
+    // shelf + grid: long-press arms drag-to-reorder
+    if ((this.mode === 'shelf' || this.mode === 'grid') && !this.reorder?.active && this.selectedId) {
       const hit = this.pickJournal(e);
       if (hit === this.selectedId) {
         const idx = this.order.indexOf(hit);
         if (idx >= 0) {
           if (this.reorderTimer != null) window.clearTimeout(this.reorderTimer);
           this.reorderTimer = window.setTimeout(() => {
-            if (this.mode === 'shelf' && this.dragging && this.dragMoved <= 7) {
-              this.reorder = {
-                active: true,
-                id: hit,
-                startIndex: idx,
-                currentIndex: idx,
-                grabX: this.dragLastX,
-                bookX: (idx - this.scroll) * SHELF_SPACING,
-                moved: false,
-                returning: false,
-              };
+            if (this.dragging && this.dragMoved <= 7 && (this.mode === 'shelf' || this.mode === 'grid')) {
+              if (this.mode === 'grid') {
+                // flat table-top overview: drag in world X/Z on the lift plane
+                const p = this.planePoint(this.dragLastX, this.dragLastY, REORDER_LIFT_Y);
+                if (!p) return;
+                const cols = this.gridCols();
+                const gapX = JOURNAL_W * 1.26;
+                const gapZ = JOURNAL_H * 1.12;
+                const col = idx % cols;
+                const row = Math.floor(idx / cols);
+                this.reorder = {
+                  active: true,
+                  id: hit,
+                  startIndex: idx,
+                  currentIndex: idx,
+                  grabX: p.x,
+                  grabZ: p.z,
+                  bookX: (col - (cols - 1) / 2) * gapX,
+                  bookZ: (row - (this.gridRows() - 1) / 2) * gapZ + this.gridScroll * gapZ,
+                  moved: false,
+                  returning: false,
+                  grid: true,
+                  startBookX: (col - (cols - 1) / 2) * gapX,
+                  startBookZ: (row - (this.gridRows() - 1) / 2) * gapZ + this.gridScroll * gapZ,
+                };
+              } else {
+                this.reorder = {
+                  active: true,
+                  id: hit,
+                  startIndex: idx,
+                  currentIndex: idx,
+                  grabX: this.dragLastX,
+                  grabZ: 0,
+                  bookX: (idx - this.scroll) * SHELF_SPACING,
+                  bookZ: 0,
+                  moved: false,
+                  returning: false,
+                  grid: false,
+                  startBookX: (idx - this.scroll) * SHELF_SPACING,
+                  startBookZ: 0,
+                };
+              }
               playTap();
             }
           }, 480);
@@ -1674,12 +1787,19 @@ export class SketchEngine {
   };
 
   private onPointerMove = (e: PointerEvent): void => {
-    // tilt target from pointer position
+    // tilt target from pointer position (frozen while reordering so the
+    // world-space drag mapping stays stable and 1:1 with the pointer)
+    const reordering = !!this.reorder?.active;
     const rect = this.renderer.domElement.getBoundingClientRect();
     const nx = ((e.clientX - rect.left) / rect.width) * 2 - 1;
     const ny = ((e.clientY - rect.top) / rect.height) * 2 - 1;
-    this.tiltTargetX = this.tiltEnabled ? nx * 0.12 : 0;
-    this.tiltTargetY = this.tiltEnabled ? -ny * 0.07 : 0;
+    if (reordering) {
+      this.tiltTargetX = 0;
+      this.tiltTargetY = 0;
+    } else {
+      this.tiltTargetX = this.tiltEnabled ? nx * 0.12 : 0;
+      this.tiltTargetY = this.tiltEnabled ? -ny * 0.07 : 0;
+    }
 
     if (!this.dragging) return;
     const dx = e.clientX - this.dragLastX;
@@ -1690,7 +1810,35 @@ export class SketchEngine {
     if (this.reorder?.active) {
       const r = this.reorder;
       if (!r.returning) {
-        // drag the lifted book; its slot follows the pointer position.
+        if (r.grid) {
+          // table-top overview: the lifted book follows the pointer over the
+          // lift plane; its slot (and currentIndex) follows the book.
+          const p = this.planePoint(e.clientX, e.clientY, REORDER_LIFT_Y);
+          if (p) {
+            const cols = this.gridCols();
+            const rows = this.gridRows();
+            const gapX = JOURNAL_W * 1.26;
+            const gapZ = JOURNAL_H * 1.12;
+            const halfW = ((cols - 1) / 2) * gapX;
+            const halfZ = ((rows - 1) / 2) * gapZ + this.gridScroll * gapZ;
+            const over = gapX * 0.55; // rubber zone past the outer slots
+            let x = r.startBookX + (p.x - r.grabX);
+            let z = r.startBookZ + (p.z - r.grabZ);
+            x = Math.max(-halfW - over, Math.min(halfW + over, x));
+            z = Math.max(-halfZ - over, Math.min(halfZ + over, z));
+            r.bookX = x;
+            r.bookZ = z;
+            r.moved = true;
+            const col = Math.max(0, Math.min(cols - 1, Math.round(x / gapX + (cols - 1) / 2)));
+            const row = Math.max(
+              0,
+              Math.min(rows - 1, Math.round((z - this.gridScroll * gapZ) / gapZ + (rows - 1) / 2)),
+            );
+            r.currentIndex = Math.max(0, Math.min(this.order.length - 1, row * cols + col));
+          }
+          return;
+        }
+        // shelf: drag the lifted book; its slot follows the pointer position.
         // rubber-band: free movement inside the slot range, damped overshoot
         // past the ends so the first/last book can't be flung offscreen.
         const minX = (0 - this.scroll) * SHELF_SPACING;
@@ -1737,7 +1885,7 @@ export class SketchEngine {
     if (this.reorder?.active) {
       const r = this.reorder;
       if (r.returning) {
-        // escape-cancelled: let the glide-back finish in the shelf loop
+        // escape-cancelled: let the glide-back finish in the shelf/grid loop
         return;
       }
       this.reorder = null;
@@ -1746,9 +1894,11 @@ export class SketchEngine {
         const ids = this.order.filter((x) => x !== r.id);
         ids.splice(r.currentIndex, 0, r.id);
         this.order = ids;
-        this.scrollTarget = Math.max(0, Math.min(this.order.length - 1, r.currentIndex));
+        if (this.mode === 'shelf') {
+          this.scrollTarget = Math.max(0, Math.min(this.order.length - 1, r.currentIndex));
+          this.layoutAll();
+        }
         this.selectedId = r.id;
-        this.layoutAll();
         this.cb.onReorder?.(r.id, r.currentIndex);
         playTap();
       }
@@ -1850,6 +2000,21 @@ export class SketchEngine {
       }
     }
     return null;
+  }
+
+  /** World point on a horizontal plane under a client-space pointer.
+   *  planeY defaults to the table (0); the reorder drag uses the lift height
+   *  so the hovering book lands exactly under the cursor. */
+  private planePoint(clientX: number, clientY: number, planeY = 0): THREE.Vector3 | null {
+    const rect = this.renderer.domElement.getBoundingClientRect();
+    const ndc = new THREE.Vector2(
+      ((clientX - rect.left) / rect.width) * 2 - 1,
+      -((clientY - rect.top) / rect.height) * 2 + 1,
+    );
+    this.raycaster.setFromCamera(ndc, this.camera);
+    const plane = new THREE.Plane(new THREE.Vector3(0, 1, 0), -planeY);
+    const p = new THREE.Vector3();
+    return this.raycaster.ray.intersectPlane(plane, p) ? p : null;
   }
 
   private pickSpread(e: PointerEvent): { side: 1 | -1; bookX: number; localZ: number } | null {

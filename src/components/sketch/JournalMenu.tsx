@@ -10,7 +10,7 @@
 
 import { useState, type ReactNode } from 'react';
 
-import { Copy, CopyPlus, FileMinus, FileUp, ImageDown, Info, Pencil, Plus, Trash2 } from 'lucide-react';
+import { Copy, CopyPlus, FileMinus, FileUp, ImageDown, Info, LayoutGrid, Pencil, Plus, Trash2 } from 'lucide-react';
 
 import type { PageTemplate } from '@/lib/sketch/types';
 
@@ -54,6 +54,8 @@ export interface JournalMenuProps {
   onDuplicatePage?: () => void;
   /** Shelf-mode JSON import (hidden when absent). */
   onImport?: () => void;
+  /** Open-mode contact sheet of every page (hidden when absent). */
+  onPagesOverview?: () => void;
   onAbout: () => void;
 }
 
@@ -152,6 +154,7 @@ export function JournalMenu({
   onDeletePage,
   onDuplicatePage,
   onImport,
+  onPagesOverview,
   onAbout,
 }: JournalMenuProps) {
   const [confirming, setConfirming] = useState<'journal' | 'page' | null>(null);
@@ -250,6 +253,13 @@ export function JournalMenu({
                   icon={<FileUp className="size-4" />}
                   label="Import journal backup…"
                   onClick={() => runAndClose(onImport)}
+                />
+              )}
+              {onPagesOverview && (
+                <MenuAction
+                  icon={<LayoutGrid className="size-4" />}
+                  label="All pages…"
+                  onClick={() => runAndClose(onPagesOverview)}
                 />
               )}
               {onExportPng && (

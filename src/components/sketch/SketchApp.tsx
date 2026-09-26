@@ -32,6 +32,7 @@ import { NewJournalModal } from './NewJournalModal';
 import { JournalMenu } from './JournalMenu';
 import { SearchOverlay } from './SearchOverlay';
 import { GridView } from './GridView';
+import { PageGridOverlay } from './PageGridOverlay';
 import { ShareSheet } from './ShareSheet';
 
 const DrawingOverlay = dynamic(() => import('./DrawingOverlay'), { ssr: false });
@@ -62,6 +63,8 @@ export default function SketchApp() {
   const [shelfHintSeen, setShelfHintSeen] = useState(false);
 
   const [gridOpen, setGridOpen] = useState(false);
+  /** open-mode contact sheet of every page in the current journal */
+  const [pagesOpen, setPagesOpen] = useState(false);
   /** 3D table-top overview (engine 'grid' mode) — shelf only */
   const [grid3d, setGrid3d] = useState(false);
   const [searchOpen, setSearchOpen] = useState(false);
@@ -332,7 +335,7 @@ export default function SketchApp() {
           body: JSON.stringify({ ids }),
         });
         if (!res.ok) throw new Error();
-        toast('Shelf reordered');
+        toast('Journals reordered');
         setShelfHintSeen(true);
       } catch {
         toast('Could not reorder', 'destructive');
@@ -745,6 +748,7 @@ export default function SketchApp() {
     (j: JournalDTO) => {
       setGridOpen(false);
       setSearchOpen(false);
+      setPagesOpen(false);
       setSelectedId(j.id);
       engineRef.current?.selectJournal(j.id);
       if (view === 'open') {
@@ -759,6 +763,17 @@ export default function SketchApp() {
     [view],
   );
 
+  /** Jump from the contact sheet to a page's spread (tweened glide). */
+  const jumpToPage = useCallback((pageIndex: number) => {
+    setPagesOpen(false);
+    const target = Math.max(0, Math.floor(pageIndex / 2));
+    engineRef.current?.setSpread(target);
+    setSpread(target);
+    const cur = detailRef.current;
+    if (cur) saveProgressRef.current(cur.id, target);
+    playTap();
+  }, []);
+
   /* keyboard shortcuts — inactive while any dialog/overlay is on top */
   useEffect(() => {
     const onKey = (e: KeyboardEvent) => {
@@ -769,6 +784,7 @@ export default function SketchApp() {
         menuOpen ||
         shareOpen ||
         gridOpen ||
+        pagesOpen ||
         searchOpen ||
         newOpen ||
         aboutOpen ||
@@ -785,7 +801,11 @@ export default function SketchApp() {
           else closeJournal();
         }
       } else if (grid3d) {
-        if (e.key === 'Escape' || e.key === 'g') engineRef.current?.exitGrid();
+        if (e.key === 'Escape' || e.key === 'g') {
+          // Esc while a grid reorder is mid-drag cancels it (book glides back)
+          if (engineRef.current?.isReordering()) engineRef.current?.cancelReorder();
+          else engineRef.current?.exitGrid();
+        }
       } else if (view === 'shelf' && e.key === 'Escape') {
         // Esc while dragging a book = cancel the reorder (book glides back)
         engineRef.current?.cancelReorder();
@@ -793,7 +813,7 @@ export default function SketchApp() {
     };
     window.addEventListener('keydown', onKey);
     return () => window.removeEventListener('keydown', onKey);
-  }, [view, editTarget, closeJournal, menuOpen, shareOpen, gridOpen, searchOpen, newOpen, aboutOpen, renaming, grid3d]);
+  }, [view, editTarget, closeJournal, menuOpen, shareOpen, gridOpen, pagesOpen, searchOpen, newOpen, aboutOpen, renaming, grid3d]);
 
   /* hint chip gently fades away after a few seconds of reading */
   useEffect(() => {
@@ -927,7 +947,7 @@ export default function SketchApp() {
         }`}
       >
         {view === 'open' && detail ? (
-          <PageDots current={spread + 1} total={spreadCount} />
+          <PageDots current={spread + 1} total={spreadCount} onClick={() => setPagesOpen(true)} />
         ) : (
           <button
             type="button"
@@ -1005,7 +1025,7 @@ export default function SketchApp() {
       {grid3d && view === 'shelf' && (
         <div className="pointer-events-none absolute inset-x-0 bottom-24 z-30 flex flex-col items-center gap-2 md:bottom-28">
           <span className="rounded-full bg-black/30 px-4 py-1.5 text-[11px] font-medium text-white/85 backdrop-blur-sm">
-            Drag up to see more · tap a journal to open
+            Drag up to see more · tap to open · hold to rearrange
           </span>
           <button
             type="button"
@@ -1066,6 +1086,15 @@ export default function SketchApp() {
           setNewOpen(true);
         }}
       />
+      <PageGridOverlay
+        open={pagesOpen && view === 'open' && !!detail}
+        journalTitle={detail?.title ?? ''}
+        pages={detail?.pages ?? []}
+        paperColor={detail?.paperColor ?? '#faf8f4'}
+        currentSpread={spread}
+        onPick={jumpToPage}
+        onClose={() => setPagesOpen(false)}
+      />
       <SearchOverlay
         open={searchOpen}
         onOpenChange={setSearchOpen}
@@ -1100,6 +1129,7 @@ export default function SketchApp() {
         }
         onDeletePage={view === 'open' && detail ? () => void deleteCurrentPage() : undefined}
         onDuplicatePage={view === 'open' && detail ? () => void duplicateCurrentPage() : undefined}
+        onPagesOverview={view === 'open' && detail ? () => setPagesOpen(true) : undefined}
         onAbout={() => {
           setMenuOpen(false);
           setAboutOpen(true);

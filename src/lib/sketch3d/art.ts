@@ -272,7 +272,8 @@ export function drawCoverArt(ctx: CanvasRenderingContext2D, style: CoverStyle, w
 
     // knockout plate: on pattern/collage covers the raw artwork runs under the
     // glyphs; a soft translucent plate of the base color restores contrast
-    // (same idea as the DOM grid cards).
+    // (same idea as the DOM grid cards). Nearly opaque base + hairline border
+    // keeps the title readable over busy pattern blobs without looking stuck-on.
     const ink = contrastText(style.color);
     const whiteInk = ink.includes('255,255,255');
     if (style.kind === 'pattern' || style.kind === 'collage') {
@@ -284,14 +285,24 @@ export function drawCoverArt(ctx: CanvasRenderingContext2D, style: CoverStyle, w
       const plateH = lines.length * fs * 1.15 + padY * 2;
       const plateY = startY - plateH / 2 + fs * 0.28;
       ctx.save();
-      ctx.globalAlpha = 0.82;
+      // base plate, almost opaque so pattern blobs never wash the text out
+      ctx.globalAlpha = 0.94;
       ctx.fillStyle = style.color;
       roundRectPath(ctx, w / 2 - plateW / 2, plateY, plateW, plateH, fs * 0.3);
       ctx.fill();
-      ctx.globalAlpha = 0.14;
-      ctx.fillStyle = whiteInk ? '#000000' : '#ffffff';
+      // gentle vertical shading so the plate reads as embossed paper
+      const pg = ctx.createLinearGradient(0, plateY, 0, plateY + plateH);
+      pg.addColorStop(0, whiteInk ? 'rgba(255,255,255,0.16)' : 'rgba(0,0,0,0.10)');
+      pg.addColorStop(1, whiteInk ? 'rgba(0,0,0,0.06)' : 'rgba(255,255,255,0.05)');
+      ctx.fillStyle = pg;
       roundRectPath(ctx, w / 2 - plateW / 2, plateY, plateW, plateH, fs * 0.3);
       ctx.fill();
+      // hairline border for definition over busy artwork
+      ctx.globalAlpha = 0.35;
+      ctx.strokeStyle = whiteInk ? 'rgba(255,255,255,0.55)' : 'rgba(0,0,0,0.35)';
+      ctx.lineWidth = Math.max(1.2, fs * 0.055);
+      roundRectPath(ctx, w / 2 - plateW / 2, plateY, plateW, plateH, fs * 0.3);
+      ctx.stroke();
       ctx.restore();
     }
 

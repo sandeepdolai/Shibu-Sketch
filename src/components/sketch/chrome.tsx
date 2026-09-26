@@ -160,27 +160,44 @@ export interface PageDotsProps {
   current: number;
   /** Total number of spreads. */
   total: number;
+  /** When provided the pill becomes a button that opens the page overview. */
+  onClick?: () => void;
   className?: string;
 }
 
 /**
  * Top-center pill showing spread progress, e.g. "3 / 6"
  * (current spread in white, total in white/50).
+ * Tapping it opens the all-pages contact sheet.
  */
-export function PageDots({ current, total, className }: PageDotsProps) {
-  return (
-    <div
-      role="status"
-      aria-label={`Spread ${current} of ${total}`}
-      className={cn(
-        'pointer-events-none inline-flex items-center rounded-full bg-black/25 px-3.5 py-1.5',
-        'text-sm font-medium tabular-nums text-white backdrop-blur-sm',
-        className,
-      )}
-    >
+export function PageDots({ current, total, onClick, className }: PageDotsProps) {
+  const inner = (
+    <>
       <span>{current}</span>
       <span className="text-white/50">&thinsp;/&thinsp;{total}</span>
-    </div>
+    </>
+  );
+  const classes = cn(
+    'inline-flex items-center rounded-full bg-black/25 px-3.5 py-1.5 text-sm font-medium tabular-nums text-white backdrop-blur-sm',
+    onClick && 'pointer-events-auto transition hover:bg-black/40 active:scale-95',
+    className,
+  );
+  if (!onClick) {
+    return (
+      <div role="status" aria-label={`Spread ${current} of ${total}`} className={classes}>
+        {inner}
+      </div>
+    );
+  }
+  return (
+    <button
+      type="button"
+      aria-label={`Spread ${current} of ${total} — open page overview`}
+      className={classes}
+      onClick={onClick}
+    >
+      {inner}
+    </button>
   );
 }
 
