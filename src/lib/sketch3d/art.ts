@@ -316,71 +316,6 @@ export function drawCoverArt(ctx: CanvasRenderingContext2D, style: CoverStyle, w
     }
   }
 
-  // title
-  const title = style.title?.trim();
-  if (title) {
-    ctx.save();
-    ctx.textAlign = 'center';
-    ctx.textBaseline = 'middle';
-    const fs = title.length > 12 ? w * 0.09 : w * 0.13;
-    ctx.font = `700 ${fs}px ui-rounded, system-ui, "Segoe UI", sans-serif`;
-    // wrap up to 3 lines
-    const words = title.split(/\s+/);
-    const lines: string[] = [];
-    let line = '';
-    for (const word of words) {
-      const t = line ? `${line} ${word}` : word;
-      if (ctx.measureText(t).width > w * 0.78 && line) {
-        lines.push(line);
-        line = word;
-      } else line = t;
-    }
-    if (line) lines.push(line);
-    const startY = h * (style.kind === 'collage' ? 0.82 : 0.5) - ((lines.length - 1) * fs * 0.6);
-
-    // knockout plate: on pattern/collage covers the raw artwork runs under the
-    // glyphs; a soft translucent plate of the base color restores contrast
-    // (same idea as the DOM grid cards). Nearly opaque base + hairline border
-    // keeps the title readable over busy pattern blobs without looking stuck-on.
-    const ink = contrastText(style.color);
-    const whiteInk = ink.includes('255,255,255');
-    if (style.kind === 'pattern' || style.kind === 'collage') {
-      const padX = fs * 0.55;
-      const padY = fs * 0.42;
-      let maxW = 0;
-      for (const l of lines) maxW = Math.max(maxW, ctx.measureText(l).width);
-      const plateW = Math.min(w * 0.92, maxW + padX * 2);
-      const plateH = lines.length * fs * 1.15 + padY * 2;
-      const plateY = startY - plateH / 2 + fs * 0.28;
-      ctx.save();
-      // base plate, almost opaque so pattern blobs never wash the text out
-      ctx.globalAlpha = 0.94;
-      ctx.fillStyle = style.color;
-      roundRectPath(ctx, w / 2 - plateW / 2, plateY, plateW, plateH, fs * 0.3);
-      ctx.fill();
-      // gentle vertical shading so the plate reads as embossed paper
-      const pg = ctx.createLinearGradient(0, plateY, 0, plateY + plateH);
-      pg.addColorStop(0, whiteInk ? 'rgba(255,255,255,0.16)' : 'rgba(0,0,0,0.10)');
-      pg.addColorStop(1, whiteInk ? 'rgba(0,0,0,0.06)' : 'rgba(255,255,255,0.05)');
-      ctx.fillStyle = pg;
-      roundRectPath(ctx, w / 2 - plateW / 2, plateY, plateW, plateH, fs * 0.3);
-      ctx.fill();
-      // hairline border for definition over busy artwork
-      ctx.globalAlpha = 0.35;
-      ctx.strokeStyle = whiteInk ? 'rgba(255,255,255,0.55)' : 'rgba(0,0,0,0.35)';
-      ctx.lineWidth = Math.max(1.2, fs * 0.055);
-      roundRectPath(ctx, w / 2 - plateW / 2, plateY, plateW, plateH, fs * 0.3);
-      ctx.stroke();
-      ctx.restore();
-    }
-
-    ctx.fillStyle = ink;
-    lines.slice(0, 3).forEach((l, i) => {
-      ctx.fillText(l, w / 2, startY + i * fs * 1.15);
-    });
-    ctx.restore();
-  }
-
   // vignette + grain for material feel
   const vg = ctx.createRadialGradient(w / 2, h / 2, h * 0.2, w / 2, h / 2, h * 0.75);
   vg.addColorStop(0, 'rgba(0,0,0,0)');
@@ -394,13 +329,13 @@ export function makeCoverTexture(style: CoverStyle): THREE.CanvasTexture {
   const [canvas, ctx] = makeCanvas(COVER_TEX_W, COVER_TEX_H);
   drawCoverArt(ctx, style, COVER_TEX_W, COVER_TEX_H);
 
-  // subtle diagonal light sheen — gives the cover a printed, laminated feel
+  // faint print sheen — the app covers read as flat printed jackets
   const sheen = ctx.createLinearGradient(0, 0, COVER_TEX_W, COVER_TEX_H);
-  sheen.addColorStop(0, 'rgba(255,255,255,0.10)');
-  sheen.addColorStop(0.35, 'rgba(255,255,255,0.02)');
+  sheen.addColorStop(0, 'rgba(255,255,255,0.05)');
+  sheen.addColorStop(0.35, 'rgba(255,255,255,0.01)');
   sheen.addColorStop(0.55, 'rgba(255,255,255,0)');
-  sheen.addColorStop(0.8, 'rgba(255,255,255,0.05)');
-  sheen.addColorStop(1, 'rgba(255,255,255,0.12)');
+  sheen.addColorStop(0.8, 'rgba(255,255,255,0.02)');
+  sheen.addColorStop(1, 'rgba(255,255,255,0.06)');
   ctx.fillStyle = sheen;
   ctx.fillRect(0, 0, COVER_TEX_W, COVER_TEX_H);
 

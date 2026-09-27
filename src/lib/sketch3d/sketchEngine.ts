@@ -27,7 +27,7 @@ import {
   type PageTextureProvider,
 } from './journalObject';
 import { bendSheet } from './sheetGeom';
-import { getShadowBlobTexture, getGutterShadowTexture, makeCoverTexture, makeFloorPoolTexture } from './art';
+import { getShadowBlobTexture, getGutterShadowTexture, makeCoverTexture } from './art';
 import { renderPageContentToCanvas } from '@/lib/sketch/render';
 import type { JournalDTO, JournalDetailDTO, PageContent } from '@/lib/sketch/types';
 import { parsePageContent } from '@/lib/sketch/types';
@@ -36,6 +36,13 @@ import { playFlip, playTap } from './sfx';
 const HALF_PI = Math.PI / 2;
 const SHELF_SPACING = 0.98;
 const SHELF_BASE_Y = JOURNAL_H / 2 + 0.02;
+/* The reference shelf is a FLAT presentation: a long lens looking straight on
+ * so the row of journals reads like the app — books fill ~84% of the frame
+ * height, edge books crop off-screen, no studio floor. */
+const SHELF_FOV = 24;
+/** look-at height: above the book row centre so books sit LOW in frame with
+ *  the app's rhythm — ~24% top margin, ~2% bottom margin */
+const SHELF_LOOK_Y = JOURNAL_H / 2 + 0.02 + 0.22;
 const SELECT_LIFT = 0.17;
 /** the selected journal swells above the row like the reference's lifted book */
 const SELECT_SCALE = 1.12;
@@ -88,10 +95,9 @@ const FAN_VISIBLE = 7;
  *  camera keeps the fan slivers tall like the reference */
 const FAN_RECEDE = 0.55;
 
-/* environment palette sampled from the reference app:
- * shelf sits on muted lavender-gray, the reading room is deep navy */
-const BG_SHELF = new THREE.Color('#6d6b85');
-const BG_OPEN = new THREE.Color('#313a56');
+/* The wall/floor gradient is drawn by CSS BEHIND the transparent canvas
+ * (see SketchApp) — sampled from the reference: shelf #7c7791→#5b5e8f,
+ * reading room flat navy #3d4463. */
 
 const easeInOut = (t: number): number => t * t * (3 - 2 * t);
 const easeOut = (t: number): number => 1 - (1 - t) * (1 - t);
@@ -239,12 +245,10 @@ export class SketchEngine {
   private openStartRoll = 0;
   private openStartScale = 1;
   /** camera pose captured at openJournal (shelf pose) for absolute lerps */
-  private openCamStart = { pos: new THREE.Vector3(0, 1.02, 5.2), look: new THREE.Vector3(0, 0.72, 0), fov: 33 };
+  private openCamStart = { pos: new THREE.Vector3(0, SHELF_LOOK_Y, 5.0), look: new THREE.Vector3(0, SHELF_LOOK_Y, 0), fov: SHELF_FOV };
 
-  /* environment: scene background lerps between the shelf wall and the
-   * reading-room navy as the journal opens/closes (reference does this) */
-  private bg = new THREE.Color(BG_SHELF.getHex());
-  private bgTarget = new THREE.Color(BG_SHELF.getHex());
+  /* environment: the CSS layers behind the transparent canvas carry the
+   * shelf gradient <-> navy room crossfade */
 
   /* shelf scroll */
   private scroll = 0; // float index
@@ -274,13 +278,12 @@ export class SketchEngine {
 
   /* light */
   private sun: THREE.DirectionalLight;
-  private pool: THREE.Mesh;
   private floorMat: THREE.ShadowMaterial;
 
   /* transient cam */
-  private camPos = new THREE.Vector3(0, 1.02, 5.2);
-  private camLook = new THREE.Vector3(0, 0.72, 0);
-  private camFov = 33;
+  private camPos = new THREE.Vector3(0, SHELF_LOOK_Y, 5.0);
+  private camLook = new THREE.Vector3(0, SHELF_LOOK_Y, 0);
+  private camFov = SHELF_FOV;
 
   private pointerDownInfo: { x: number; y: number; t: number; id: string } | null = null;
 
@@ -310,13 +313,14 @@ export class SketchEngine {
     this.renderer.domElement.style.touchAction = 'pan-y';
 
     this.scene = new THREE.Scene();
-    this.scene.background = this.bg;
-    this.camera = new THREE.PerspectiveCamera(33, 1, 0.05, 60);
+    // transparent clear — the CSS gradient behind the canvas is the backdrop
+    this.scene.background = null;
+    this.camera = new THREE.PerspectiveCamera(SHELF_FOV, 1, 0.05, 60);
     this.camera.position.copy(this.camPos);
 
-    const hemi = new THREE.HemisphereLight(0xffffff, 0x77748f, 1.05);
+    const hemi = new THREE.HemisphereLight(0xffffff, 0x77748f, 1.0);
     this.scene.add(hemi);
-    this.sun = new THREE.DirectionalLight(0xffffff, 1.4);
+    this.sun = new THREE.DirectionalLight(0xffffff, 1.05);
     this.sun.position.set(-2.4, 4.2, 3.2);
     this.sun.castShadow = true;
     this.sun.shadow.mapSize.set(1024, 1024);
@@ -327,27 +331,18 @@ export class SketchEngine {
     this.sun.shadow.camera.far = 14;
     this.sun.shadow.radius = 5;
     this.scene.add(this.sun);
-    const rim = new THREE.DirectionalLight(0xfff3e0, 0.5);
+    const rim = new THREE.DirectionalLight(0xfff3e0, 0.35);
     rim.position.set(2.5, 2.0, -1.5);
     this.scene.add(rim);
 
-    // shadow-catcher floor
-    this.floorMat = new THREE.ShadowMaterial({ opacity: 0.2 });
+    // shadow-catcher floor (only the soft contact shadows render on it —
+    // the app shows no floor line, just small shadows under the books)
+    this.floorMat = new THREE.ShadowMaterial({ opacity: 0.16 });
     const floor = new THREE.Mesh(new THREE.PlaneGeometry(30, 20), this.floorMat);
     floor.rotation.x = -HALF_PI;
     floor.position.y = 0;
     floor.receiveShadow = true;
     this.scene.add(floor);
-
-    // wide, soft pool of warm light grounding the shelf (reading-room feel)
-    const poolTex = makeFloorPoolTexture();
-    this.pool = new THREE.Mesh(
-      new THREE.PlaneGeometry(14, 4.6),
-      new THREE.MeshBasicMaterial({ map: poolTex, transparent: true, depthWrite: false, opacity: 0.5 }),
-    );
-    this.pool.rotation.x = -HALF_PI;
-    this.pool.position.set(0, 0.002, 0.35);
-    this.scene.add(this.pool);
 
     this.textures = {
       getPageTexture: (idx) => this.pageTexture(idx, 'right'),
@@ -444,8 +439,7 @@ export class SketchEngine {
       bm2.color.set(backTex ? '#ffffff' : this.paperColor);
       bm2.needsUpdate = true;
     }
-    // reading room: the wall deepens to navy as the book opens
-    this.bgTarget.copy(BG_OPEN);
+    // reading room: the CSS backdrop crossfades to navy as the book opens
     // per-sheet content faces (page 2i+1 rides sheet i's top)
     entry.obj.sheetFaces.forEach((f, i) => {
       const mat = f.material as THREE.MeshStandardMaterial;
@@ -480,7 +474,6 @@ export class SketchEngine {
       this.pageZoom = null;
       this.cb.onZoomChange?.(false);
     }
-    this.bgTarget.copy(BG_SHELF);
     // the closing choreography lerps absolutely from the reading pose
     const oc = this.openCamTarget();
     this.camPos.copy(oc.pos);
@@ -545,15 +538,12 @@ export class SketchEngine {
       window.clearTimeout(this.reorderTimer);
       this.reorderTimer = null;
     }
-    this.camFov = 33;
     this.updateCameraFit();
-    this.camPos.set(0, 1.02, 5.2);
-    this.camLook.set(0, 0.72, 0);
     this.layoutAll();
     for (const [, j] of this.journals) {
       j.obj.root.visible = true;
       j.blob.visible = true;
-      (j.blob.material as THREE.MeshBasicMaterial).opacity = 0.38;
+      (j.blob.material as THREE.MeshBasicMaterial).opacity = 0.26;
     }
     if (wasGrid) this.cb.onGridChange?.(false);
   }
@@ -982,25 +972,26 @@ export class SketchEngine {
   /* ================================================================ */
 
   private addJournal(dto: JournalDTO, index: number): void {
+    // flat matte covers like the app's printed jackets — no gloss
     const coverMat = new THREE.MeshPhysicalMaterial({
       color: dto.coverStyle.color,
-      roughness: 0.62,
-      clearcoat: 0.25,
-      clearcoatRoughness: 0.5,
+      roughness: 0.85,
+      clearcoat: 0.05,
+      clearcoatRoughness: 0.8,
     });
     // spine band: the reference gives each journal a distinct spine wrap —
     // dark covers often wear a cream/white spine, light covers a deepened tone
     const spineMat = new THREE.MeshPhysicalMaterial({
       color: spineColorFor(dto.coverStyle),
-      roughness: 0.7,
-      clearcoat: 0.15,
-      clearcoatRoughness: 0.6,
+      roughness: 0.88,
+      clearcoat: 0.03,
+      clearcoatRoughness: 0.85,
     });
     const coverArtMat = new THREE.MeshPhysicalMaterial({
       color: 0xffffff,
-      roughness: 0.55,
-      clearcoat: 0.3,
-      clearcoatRoughness: 0.45,
+      roughness: 0.88,
+      clearcoat: 0.05,
+      clearcoatRoughness: 0.8,
     });
     const artTex = makeCoverTexture(dto.coverStyle);
     coverArtMat.map = artTex;
@@ -1029,7 +1020,7 @@ export class SketchEngine {
       }),
     );
     blob.rotation.x = -HALF_PI;
-    blob.scale.set(1.5, 1.7, 1);
+    blob.scale.set(1.15, 1.5, 1);
     this.scene.add(blob);
 
     const entry: ShelfEntry = { dto, obj, coverMat, spineMat, coverArtMat, blob };
@@ -1059,17 +1050,18 @@ export class SketchEngine {
     const fromCenter = index - this.scroll;
     const root = entry.obj.root;
     root.position.x = fromCenter * SHELF_SPACING;
-    root.position.z = -Math.min(0.5, Math.abs(fromCenter) * 0.2);
-    root.rotation.y = Math.max(-0.42, Math.min(0.42, -fromCenter * 0.18));
+    // FLAT row (reference): near-zero depth push, books almost face-on
+    root.position.z = -Math.min(0.08, Math.abs(fromCenter) * 0.03);
+    root.rotation.y = Math.max(-0.14, Math.min(0.14, -fromCenter * 0.045));
     const isSelected = entry.dto.id === this.selectedId;
     root.position.y = SHELF_BASE_Y + (isSelected && this.mode === 'shelf' ? SELECT_LIFT : 0);
     if (this.mode === 'shelf') root.scale.setScalar(isSelected ? SELECT_SCALE : 1);
     entry.blob.visible = true;
     entry.blob.position.set(root.position.x, 0.004, root.position.z + 0.05);
     const s = root.scale.x;
-    entry.blob.scale.set(1.5 * s, 1.7 * s, 1);
+    entry.blob.scale.set(1.15 * s, 1.5 * s, 1);
     (entry.blob.material as THREE.MeshBasicMaterial).opacity =
-      (isSelected ? 0.55 : 0.38) * s;
+      (isSelected ? 0.42 : 0.26) * s;
     entry.obj.stand.rotation.x = HALF_PI;
     entry.obj.stand.position.y = 0;
     entry.obj.coverPivot.rotation.z = 0;
@@ -1126,7 +1118,7 @@ export class SketchEngine {
 
   /** Open-pose camera direction — straight-on at the upright spread (the
    *  reference reading view is essentially orthographic face-on). */
-  private openCamDir = new THREE.Vector3(0, 0.045, 0.999);
+  private openCamDir = new THREE.Vector3(0, 0.03, 0.999);
 
   /** Open-pose camera target — fits the whole spread + chained fans at ANY
    *  aspect ratio. Long lens (low fov) like the reference reading room: the
@@ -1135,13 +1127,12 @@ export class SketchEngine {
    *  (spread + both fans) constraints; portrait phones pull way back. */
   private openCamTarget(): { pos: THREE.Vector3; look: THREE.Vector3; fov: number } {
     const aspect = this.camera.aspect || 1;
-    const fov = aspect < 0.9 ? 33 : 25;
+    const fov = aspect < 0.9 ? 30 : 22;
     const tanF = Math.tan((fov * Math.PI) / 360);
-    const needV = JOURNAL_H * 1.62; // spread height + breathing room (title clearance)
-    // the chained fans add ~1.05 journal-widths per side; on portrait the
-    // outer slivers crop at the screen edges (like the reference phone view)
-    // so the spread still reads large
-    const needW = JOURNAL_W * (aspect < 1 ? 2.15 : 3.85);
+    // the reference spread fills the frame: book ~77% of frame height, the
+    // outer fan slivers CROP at the screen edges (app reference, open spread)
+    const needV = JOURNAL_H * 1.32; // spread height + breathing room (title clearance)
+    const needW = JOURNAL_W * (aspect < 1 ? 1.95 : 2.95);
     const dist = Math.max(needV / (2 * tanF), needW / (2 * tanF * aspect));
     return {
       pos: new THREE.Vector3(
@@ -1801,7 +1792,7 @@ export class SketchEngine {
             const slotX = (r.startIndex - this.scroll) * SHELF_SPACING;
             r.bookX = lerp(r.bookX, slotX, 0.22);
             root.position.x = r.bookX;
-            root.position.z = lerp(root.position.z, -Math.min(0.55, Math.abs(fromCenter) * 0.22), 0.2);
+            root.position.z = lerp(root.position.z, -Math.min(0.08, Math.abs(fromCenter) * 0.03), 0.2);
             root.position.y = lerp(root.position.y, SHELF_BASE_Y + SELECT_LIFT, 0.16);
             root.rotation.y = lerp(root.rotation.y, 0, 0.18);
             root.rotation.z = lerp(root.rotation.z, 0, 0.18);
@@ -1832,9 +1823,9 @@ export class SketchEngine {
         } else {
           root.position.x = fromCenter * SHELF_SPACING;
         }
-        root.position.z = -Math.min(0.55, Math.abs(fromCenter) * 0.22);
-        const sway = Math.sin(now * 0.7 + i * 2.1) * 0.02;
-        root.rotation.y = Math.max(-0.45, Math.min(0.45, -fromCenter * 0.18 - this.dragVelocity * 2.4 + sway));
+        root.position.z = -Math.min(0.08, Math.abs(fromCenter) * 0.03);
+        const sway = Math.sin(now * 0.7 + i * 2.1) * 0.012;
+        root.rotation.y = Math.max(-0.14, Math.min(0.14, -fromCenter * 0.045 - this.dragVelocity * 0.7 + sway));
         const isSelected = id === this.selectedId;
         const targetY = SHELF_BASE_Y + (isSelected ? SELECT_LIFT : 0);
         root.position.y = lerp(root.position.y, targetY, 0.14);
@@ -1849,9 +1840,9 @@ export class SketchEngine {
           sp.position.y = lerp(sp.position.y, sp.userData.baseY as number, 0.14);
         }
         entry.blob.position.set(root.position.x, 0.004, root.position.z + 0.05);
-        entry.blob.scale.set(1.5, 1.7, 1);
+        entry.blob.scale.set(1.15, 1.5, 1);
         const blobMat = entry.blob.material as THREE.MeshBasicMaterial;
-        blobMat.opacity = lerp(blobMat.opacity, isSelected ? 0.55 : 0.34, 0.14);
+        blobMat.opacity = lerp(blobMat.opacity, isSelected ? 0.42 : 0.26, 0.14);
       });
       this.dragVelocity *= 0.9;
     } else if (this.mode === 'grid') {
@@ -1883,11 +1874,9 @@ export class SketchEngine {
 
     // environment drift: wall color + floor pool follow the mode target;
     // the reading room also softens the sun's cast shadow on the floor
-    this.bg.lerp(this.bgTarget, 0.07);
-    const poolMat = this.pool.material as THREE.MeshBasicMaterial;
-    const poolTarget = this.mode === 'shelf' || this.mode === 'grid' ? 0.5 : 0.1;
-    poolMat.opacity = lerp(poolMat.opacity, poolTarget, 0.06);
-    const floorTarget = this.mode === 'shelf' || this.mode === 'grid' ? 0.2 : 0.05;
+    // environment: the floor keeps only a whisper of shadow in reading mode
+    // (the CSS backdrop behind the canvas handles the wall colors)
+    const floorTarget = this.mode === 'shelf' || this.mode === 'grid' ? 0.16 : 0.05;
     this.floorMat.opacity = lerp(this.floorMat.opacity, floorTarget, 0.06);
 
     // tilt parallax (suppressed while the page is zoomed fullscreen)
@@ -1943,15 +1932,19 @@ export class SketchEngine {
 
   private updateCameraFit(): void {
     if (this.mode !== 'shelf') return;
-    const aspect = this.camera.aspect;
-    // portrait phones: pull the camera back a touch and widen fov
-    if (aspect < 1) {
-      this.camFov = 33 + Math.min(14, (1 - aspect) * 26);
-      this.camPos.z = 5.2 + Math.min(1.8, (1 - aspect) * 3.6);
-    } else {
-      this.camFov = 33;
-      this.camPos.z = 5.2;
-    }
+    const aspect = this.camera.aspect || 1;
+    // long lens + straight-on = the app's flat presentation; books fill the
+    // frame (landscape: 84% of height; portrait: ~64% of width so neighbor
+    // slivers peek in from the screen edges)
+    this.camFov = SHELF_FOV;
+    const tanF = Math.tan((SHELF_FOV * Math.PI) / 360);
+    const needH =
+      aspect < 1
+        ? JOURNAL_W / 0.64 / aspect
+        : JOURNAL_H / 0.76;
+    const dist = needH / (2 * tanF);
+    this.camPos.set(0, SHELF_LOOK_Y, dist);
+    this.camLook.set(0, SHELF_LOOK_Y, 0);
   }
 
   /* ================================================================ */

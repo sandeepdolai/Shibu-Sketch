@@ -10,9 +10,9 @@
 
 import type { ReactNode } from 'react';
 
-import { BookOpen, LayoutGrid, Menu, Search, Volume2, VolumeX } from 'lucide-react';
+import { BookOpen, Search, Volume2, VolumeX } from 'lucide-react';
 
-import { GhostIconButton, PaperWordmark } from './chrome';
+import { GhostIconButton } from './chrome';
 
 const ICON = 'size-5';
 
@@ -38,54 +38,30 @@ function TopBarShell({
 export interface ShelfTopBarProps {
   /** Number of journals — rendered inside the count pill. */
   journalCount: number;
-  /** Muted state for generated UI sounds. */
-  soundMuted?: boolean;
-  onToggleSound?: () => void;
-  onWordmark: () => void;
   /** Count pill click → grid view. */
   onGrid: () => void;
-  onSearch: () => void;
-  onMenu: () => void;
 }
 
-/** Top bar on the shelf view: wordmark left · count pill, search, menu right. */
-export function ShelfTopBar({
-  journalCount,
-  onWordmark,
-  onGrid,
-  onSearch,
-  onMenu,
-  soundMuted,
-  onToggleSound,
-}: ShelfTopBarProps) {
+/** Top bar on the shelf view — deliberately MINIMAL like the reference app:
+ *  nothing but a small translucent count pill in the top-right corner. */
+export function ShelfTopBar({ journalCount, onGrid }: ShelfTopBarProps) {
   return (
     <TopBarShell
-      left={<PaperWordmark onClick={onWordmark} />}
+      left={null}
       right={
-        <>
-          <button
-            type="button"
-            onClick={onGrid}
-            aria-label={`${journalCount} ${journalCount === 1 ? 'journal' : 'journals'} — open grid view`}
-            className={`
-              pointer-events-auto inline-flex min-h-11 min-w-11 items-center justify-center rounded-full
-              border border-white/25 bg-black/10 px-4 text-sm font-semibold text-white backdrop-blur-sm
-              transition-all duration-150 hover:bg-white/20 active:scale-95
-              focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-white/70
-            `}
-          >
-            {journalCount}
-          </button>
-          {onToggleSound && (
-            <GhostIconButton
-              icon={soundMuted ? <VolumeX className={ICON} /> : <Volume2 className={ICON} />}
-              label={soundMuted ? 'Unmute sounds' : 'Mute sounds'}
-              onClick={onToggleSound}
-            />
-          )}
-          <GhostIconButton icon={<Search className={ICON} />} label="Search journals" onClick={onSearch} />
-          <GhostIconButton icon={<Menu className={ICON} />} label="Menu" onClick={onMenu} />
-        </>
+        <button
+          type="button"
+          onClick={onGrid}
+          aria-label={`${journalCount} ${journalCount === 1 ? 'journal' : 'journals'} — open grid view`}
+          className={`
+            pointer-events-auto inline-flex h-9 min-w-9 items-center justify-center rounded-full
+            bg-black/10 px-2.5 text-xs font-semibold text-white/80 backdrop-blur-sm
+            transition-all duration-150 hover:bg-white/20 hover:text-white active:scale-95
+            focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-white/70
+          `}
+        >
+          {journalCount}
+        </button>
       }
     />
   );
@@ -98,24 +74,18 @@ export function ShelfTopBar({
 export interface OpenTopBarProps {
   /** Back to shelf. */
   onBack: () => void;
-  onGrid: () => void;
   onSearch: () => void;
-  onMenu: () => void;
   /** Muted state for generated UI sounds. */
   soundMuted?: boolean;
   onToggleSound?: () => void;
 }
 
-/** Top bar while a journal is open: back + grid left · sound + search + menu right. */
-export function OpenTopBar({ onBack, onGrid, onSearch, onMenu, soundMuted, onToggleSound }: OpenTopBarProps) {
+/** Top bar while a journal is open — minimal like the reference: a small
+ *  back arrow on the left, sound + search on the right. */
+export function OpenTopBar({ onBack, onSearch, soundMuted, onToggleSound }: OpenTopBarProps) {
   return (
     <TopBarShell
-      left={
-        <>
-          <GhostIconButton icon={<BookOpen className={ICON} />} label="Back to shelf" onClick={onBack} />
-          <GhostIconButton icon={<LayoutGrid className={ICON} />} label="All journals" onClick={onGrid} />
-        </>
-      }
+      left={<GhostIconButton icon={<BookOpen className={ICON} />} label="Back to shelf" onClick={onBack} />}
       right={
         <>
           {onToggleSound && (
@@ -126,7 +96,6 @@ export function OpenTopBar({ onBack, onGrid, onSearch, onMenu, soundMuted, onTog
             />
           )}
           <GhostIconButton icon={<Search className={ICON} />} label="Search" onClick={onSearch} />
-          <GhostIconButton icon={<Menu className={ICON} />} label="Journal menu" onClick={onMenu} />
         </>
       }
     />

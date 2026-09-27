@@ -171,11 +171,11 @@ export interface PageDotsProps {
  * Tapping it opens the all-pages contact sheet.
  */
 export function PageDots({ current, total, onClick, className }: PageDotsProps) {
+  // the reference reading view shows a single small "N Pages" pill — no dots
   const inner = (
-    <>
-      <span>{current}</span>
-      <span className="text-white/50">&thinsp;/&thinsp;{total}</span>
-    </>
+    <span>
+      {total} {total === 1 ? 'Page' : 'Pages'}
+    </span>
   );
   const classes = cn(
     'inline-flex items-center rounded-full bg-black/25 px-3.5 py-1.5 text-sm font-medium tabular-nums text-white backdrop-blur-sm',
@@ -192,7 +192,7 @@ export function PageDots({ current, total, onClick, className }: PageDotsProps) 
   return (
     <button
       type="button"
-      aria-label={`Spread ${current} of ${total} — open page overview`}
+      aria-label={`${total} pages — open page overview`}
       className={classes}
       onClick={onClick}
     >

@@ -837,13 +837,14 @@ export default function SketchApp() {
 
   return (
     <div className="relative h-[100dvh] w-full overflow-hidden select-none">
-      {/* backgrounds crossfade (light shelf <-> dark reading room) */}
+      {/* backgrounds crossfade (light shelf <-> dark reading room) —
+          gradient stops sampled from the reference app frames */}
       <div
         aria-hidden
         className="pointer-events-none absolute inset-0 transition-opacity duration-[1200ms] ease-in-out"
         style={{
           opacity: dark ? 0 : 1,
-          background: 'linear-gradient(to bottom, #908dad 0%, #8b88a6 42%, #7b7896 100%)',
+          background: 'linear-gradient(to bottom, #7e7995 0%, #6f6d92 52%, #5b5e8f 100%)',
         }}
       />
       <div
@@ -851,27 +852,7 @@ export default function SketchApp() {
         className="pointer-events-none absolute inset-0 transition-opacity duration-[1200ms] ease-in-out"
         style={{
           opacity: dark ? 1 : 0,
-          background:
-            'radial-gradient(120% 90% at 50% 42%, #3c4358 0%, #343b4d 45%, #262c3b 100%)',
-        }}
-      />
-      {/* warm reading-lamp glow, top center (dark view only) */}
-      <div
-        aria-hidden
-        className="pointer-events-none absolute inset-0 transition-opacity duration-[1200ms] ease-in-out"
-        style={{
-          opacity: dark ? 1 : 0,
-          background:
-            'radial-gradient(44% 26% at 50% -2%, rgba(255,232,196,0.13) 0%, rgba(255,232,196,0.05) 45%, rgba(255,232,196,0) 100%)',
-        }}
-      />
-      {/* film grain */}
-      <div
-        aria-hidden
-        className="pointer-events-none absolute inset-0 opacity-[0.05] mix-blend-overlay"
-        style={{
-          backgroundImage:
-            "url(\"data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='160' height='160'%3E%3Cfilter id='n'%3E%3CfeTurbulence type='fractalNoise' baseFrequency='0.9' numOctaves='2'/%3E%3C/filter%3E%3Crect width='160' height='160' filter='url(%23n)' opacity='0.7'/%3E%3C/svg%3E\")",
+          background: 'linear-gradient(to bottom, #3f4566 0%, #3c4263 100%)',
         }}
       />
 
@@ -909,7 +890,6 @@ export default function SketchApp() {
       {view === 'shelf' || view === 'closing' ? (
         <ShelfTopBar
           journalCount={journals.length}
-          onWordmark={() => setAboutOpen(true)}
           onGrid={() => {
             if (view !== 'shelf') return;
             const engine = engineRef.current;
@@ -918,10 +898,6 @@ export default function SketchApp() {
             if (engine.isGrid()) engine.exitGrid();
             else engine.enterGrid();
           }}
-          onSearch={() => setSearchOpen(true)}
-          onMenu={() => setAboutOpen(true)}
-          soundMuted={soundMuted}
-          onToggleSound={toggleSound}
         />
       ) : (
         <div
@@ -931,60 +907,39 @@ export default function SketchApp() {
         >
           <OpenTopBar
             onBack={closeJournal}
-            onGrid={() => setGridOpen(true)}
             onSearch={() => setSearchOpen(true)}
-            onMenu={() => setMenuOpen(true)}
             soundMuted={soundMuted}
             onToggleSound={toggleSound}
           />
         </div>
       )}
 
-      {/* top-center page dots / menu */}
+      {/* top-center page pill (open view) — the reference shows only "N Pages" */}
       <div
         className={`pointer-events-none absolute inset-x-0 top-2.5 z-30 flex justify-center transition-opacity duration-300 md:top-3 ${
           pageZoomed ? 'opacity-0' : 'opacity-100'
         }`}
       >
         {view === 'open' && detail ? (
-          <PageDots current={spread + 1} total={spreadCount} onClick={() => setPagesOpen(true)} />
-        ) : (
-          <button
-            type="button"
-            aria-label="About Shibu Sketch"
-            className="pointer-events-auto rounded-full px-3 py-1 text-white/70 transition hover:text-white"
-            onClick={() => setAboutOpen(true)}
-          >
-            ···
-          </button>
-        )}
+          <PageDots current={spread + 1} total={detail.pages.length} onClick={() => setPagesOpen(true)} />
+        ) : null}
       </div>
 
-      {/* title block */}
+      {/* title block — grid overview only (the reference shows no big titles
+          over the shelf OR the open spread, just the small pages pill) */}
       <div
         className={`pointer-events-none absolute inset-x-0 top-16 z-20 flex flex-col items-center gap-1 transition-opacity duration-300 md:top-20 ${
           pageZoomed ? 'opacity-0' : 'opacity-100'
         }`}
       >
-        {view === 'open' && detail ? (
-          <TitleBlock title={detail.title} pageCount={detail.pages.length} mode="open" />
-        ) : grid3d && view === 'shelf' ? (
+        {grid3d && view === 'shelf' ? (
           <TitleBlock
             title="All Journals"
             pageCount={journals.length}
             mode="shelf"
             subtitle={`${journals.length} ${journals.length === 1 ? 'Journal' : 'Journals'}`}
           />
-        ) : (
-          selected && (
-            <TitleBlock
-              title={selected.title}
-              pageCount={selected.pageCount}
-              mode="shelf"
-              subtitle={undefined}
-            />
-          )
-        )}
+        ) : null}
       </div>
 
       {/* scrubber (open view) */}
@@ -1038,17 +993,38 @@ export default function SketchApp() {
         </div>
       )}
 
-      {/* bottom dock (fades out while a page is zoomed fullscreen) */}
-      {(view === 'shelf' || view === 'open') && (
+      {/* shelf: single + button, bottom-right — the classic Paper shelf kept
+          the whole row clean except this one affordance */}
+      {view === 'shelf' && (
+        <button
+          type="button"
+          aria-label="New journal"
+          onClick={() => {
+            setNewOpen(true);
+            playTap();
+          }}
+          className={`
+            absolute bottom-5 right-5 z-30 flex size-12 items-center justify-center rounded-full
+            bg-white/85 text-zinc-700 shadow-lg shadow-black/20 backdrop-blur-sm transition-all
+            duration-150 hover:bg-white hover:shadow-xl active:scale-95 md:bottom-7 md:right-7
+            focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-white/70
+          `}
+        >
+          <Plus className="size-5" />
+        </button>
+      )}
+
+      {/* bottom dock — reading view only (fades out while a page is zoomed) */}
+      {view === 'open' && (
         <div
           className={`transition-opacity duration-300 ${
             pageZoomed ? 'pointer-events-none opacity-0' : 'opacity-100'
           }`}
         >
           <BottomDock
-            variant={view === 'open' ? 'open' : 'shelf'}
+            variant="open"
             onMore={() => {
-              if (view === 'open' && detail) {
+              if (detail) {
                 setRenameValue(detail.title);
               }
               setMenuOpen(true);
@@ -1064,10 +1040,8 @@ export default function SketchApp() {
               playTap();
             }}
             onPlus={() => {
-              if (view === 'open' && detail) {
+              if (detail) {
                 void addPage();
-              } else {
-                setNewOpen(true);
               }
               playTap();
             }}
