@@ -66,10 +66,15 @@ const SELECT_DUR = 0.45;
  * at the previous page's outer edge and steepens by FAN_DA, capping near
  * edge-on. Only the first FAN_VISIBLE pages read as distinct slivers; the
  * rest freeze into a dense tail behind them. */
-const FAN_A1 = 1.03;
-const FAN_DA = 0.115;
+const FAN_A1 = 0.98;
+const FAN_DA = 0.1;
 const FAN_AMAX = 1.5;
-const FAN_GAP = 0.006;
+/** fan pages TUCK slightly under the previous page's edge (the reference
+ *  shows clean corner seams — no notches). Safe: consecutive slabs sit one
+ *  sheet-thickness apart and the tilt divergence pulls them apart. */
+const FAN_GAP = -0.008;
+/** how far fan page 1's hinge tucks under the spread's fore-edge */
+const FAN_TUCK = 0.03;
 const FAN_VISIBLE = 7;
 /** cheat scale on the chain's depth recession so the long-lens reading
  *  camera keeps the fan slivers tall like the reference */
@@ -1160,7 +1165,7 @@ export class SketchEngine {
     }
     const d = Math.min(depth, 30);
     const ang = (j: number): number => Math.min(FAN_A1 + (j - 1) * FAN_DA, FAN_AMAX);
-    let x = JOURNAL_W;
+    let x = JOURNAL_W - FAN_TUCK;
     let rec = 0;
     const steps = Math.min(d, FAN_VISIBLE) - 1;
     for (let j = 1; j <= steps; j++) {
