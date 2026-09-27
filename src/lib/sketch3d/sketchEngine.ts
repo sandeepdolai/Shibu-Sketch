@@ -46,8 +46,34 @@ const OPEN_CENTER_Y = 1.05;
  *  face-in ≈ 0.35s → settle */
 const OPEN_DUR = 1.02;
 const CLOSE_DUR = 0.82;
+/** QA hook: `?slowmo=4` stretches open/close/flip choreography 4× for
+ *  frame-by-frame verification against the reference videos. */
+const SLOWMO = (() => {
+  try {
+    const v = parseFloat(new URLSearchParams(window.location.search).get('slowmo') ?? '0');
+    return Number.isFinite(v) && v > 0 ? v : 1;
+  } catch {
+    return 1;
+  }
+})();
+const OPEN_DUR_EFF = OPEN_DUR * SLOWMO;
+const CLOSE_DUR_EFF = CLOSE_DUR * SLOWMO;
 const FLIP_DUR = 0.45;
 const SELECT_DUR = 0.45;
+
+/* Chained-hinge reading fan (matched to the reference screenshots/frames):
+ * fan page 1 tilts ~59° back from the spread plane, each deeper page hinges
+ * at the previous page's outer edge and steepens by FAN_DA, capping near
+ * edge-on. Only the first FAN_VISIBLE pages read as distinct slivers; the
+ * rest freeze into a dense tail behind them. */
+const FAN_A1 = 1.03;
+const FAN_DA = 0.115;
+const FAN_AMAX = 1.5;
+const FAN_GAP = 0.006;
+const FAN_VISIBLE = 7;
+/** cheat scale on the chain's depth recession so the long-lens reading
+ *  camera keeps the fan slivers tall like the reference */
+const FAN_RECEDE = 0.55;
 
 /* environment palette sampled from the reference app:
  * shelf sits on muted lavender-gray, the reading room is deep navy */
@@ -182,6 +208,9 @@ export class SketchEngine {
    *  the interpolation always converges no matter how far the shelf was scrolled */
   private slideStart = new Map<string, { x: number; y: number; blob: number }>();
   private flip: FlipState = { active: false, dir: 1, from: 0, start: 0 };
+  /** per-sheet glide poses while a page flies (fan re-chaining animation) */
+  private flipSheetFrom: Array<{ x: number; y: number; rz: number } | null> = [];
+  private flipSheetTo: Array<{ x: number; y: number; rz: number } | null> = [];
   private spreadTween: SpreadTween = { active: false, from: 0, to: 0, start: 0 };
   private pageZoom: PageZoomState | null = null;
   private reorder: ReorderState | null = null;
@@ -804,10 +833,10 @@ export class SketchEngine {
     this.prepareFlipSheet(this.spread, dir);
     if (dir === 1) {
       // flying sheet k leaves the right stack; left stack grows after it lands
-      this.layoutStaticSheets(this.spread, this.spread + 1, this.spread, 1);
+      this.layoutStaticSheets(this.spread, this.spread);
     } else {
       // flying sheet (k-1) leaves the left stack
-      this.layoutStaticSheets(this.spread - 1, this.spread, this.spread - 1, -1);
+      this.layoutStaticSheets(this.spread - 1, this.spread - 1);
     }
     playFlip();
     return true;
@@ -846,11 +875,11 @@ export class SketchEngine {
       mesh.visible = true;
       const pose = (k: number): { x: number; y: number; z: number; rz: number } => {
         if (i < k) {
-          const p = this.fanPose(k - 1 - i, true);
-          return { x: p.x, y: COVER_T + (i + 0.5) * SHEET_T, z: p.z, rz: p.rz };
+          const p = this.chainPose(k - 1 - i, true);
+          return { x: p.x, y: COVER_T + (i + 0.5) * SHEET_T + p.rec, z: 0, rz: p.rz };
         }
-        const p = this.fanPose(i - k, false);
-        return { x: p.x, y: stackTop - (i + 0.5) * SHEET_T, z: p.z, rz: p.rz };
+        const p = this.chainPose(i - k, false);
+        return { x: p.x, y: stackTop - (i + 0.5) * SHEET_T + p.rec, z: 0, rz: p.rz };
       };
       const a = pose(k0);
       const b = pose(k1);
@@ -1072,7 +1101,7 @@ export class SketchEngine {
     const canvas = renderPageContentToCanvas(content, 620, 1129, this.paperColor);
     tex = new THREE.CanvasTexture(canvas);
     tex.colorSpace = THREE.SRGBColorSpace;
-    tex.anisotropy = 4;
+    tex.anisotropy = 8;
     if (variant === 'left') {
       tex.flipY = false; // left geometry is Y-mirrored
     } else if (variant === 'flip') {
@@ -1087,17 +1116,20 @@ export class SketchEngine {
    *  reference reading view is essentially orthographic face-on). */
   private openCamDir = new THREE.Vector3(0, 0.045, 0.999);
 
-  /** Open-pose camera target — fits the whole spread at ANY aspect ratio.
+  /** Open-pose camera target — fits the whole spread + chained fans at ANY
+   *  aspect ratio. Long lens (low fov) like the reference reading room: the
+   *  fan pages recede in depth yet keep nearly full height on screen.
    *  Distance solves both the vertical (page height) and horizontal
-   *  (both pages) constraints; portrait phones pull way back. */
+   *  (spread + both fans) constraints; portrait phones pull way back. */
   private openCamTarget(): { pos: THREE.Vector3; look: THREE.Vector3; fov: number } {
     const aspect = this.camera.aspect || 1;
-    const fov = aspect < 0.9 ? 46 : 37;
+    const fov = aspect < 0.9 ? 33 : 25;
     const tanF = Math.tan((fov * Math.PI) / 360);
-    const needV = JOURNAL_H * 1.6; // spread height + breathing room (title clearance)
-    // the stepped-deck fan needs side margin on landscape; on portrait the
-    // fan may kiss the screen edges so the spread still reads large
-    const needW = JOURNAL_W * 2 + (aspect < 1 ? 0.3 : 0.92);
+    const needV = JOURNAL_H * 1.62; // spread height + breathing room (title clearance)
+    // the chained fans add ~1.05 journal-widths per side; on portrait the
+    // outer slivers crop at the screen edges (like the reference phone view)
+    // so the spread still reads large
+    const needW = JOURNAL_W * (aspect < 1 ? 2.15 : 3.85);
     const dist = Math.max(needV / (2 * tanF), needW / (2 * tanF * aspect));
     return {
       pos: new THREE.Vector3(
@@ -1112,21 +1144,50 @@ export class SketchEngine {
     };
   }
 
-  /** Stepped-deck fan pose for a sheet `depth` steps below its stack's top.
-   *  The reference fans the open book's pages like a deck slid sideways: each
-   *  deeper sheet steps OUTWARD past the one in front, drops a touch lower
-   *  and rotates a few degrees away from the reader around the gutter — the
-   *  upright ribbed cascade that reads as extra width behind the spread.
-   *  Content faces on the first pages catch the light at grazing angles. */
-  private fanPose(depth: number, left: boolean): { x: number; z: number; rz: number } {
-    const d = Math.min(depth, 7);
-    const step = 0.115 * JOURNAL_W;
-    const shift = step * Math.min(d, 5) + (d > 5 ? step * 0.4 * (d - 5) : 0);
-    const ang = Math.min(0.16 + d * 0.095, 0.56);
-    const drop = 0.012 * d;
-    return left
-      ? { x: -shift, z: drop, rz: Math.PI + ang }
-      : { x: shift, z: drop, rz: -ang };
+  /** Chained-hinge fan pose for a sheet `depth` steps below its stack's top
+   *  (0 = the flat spread-supporting sheet). Matched to the reference reading
+   *  view: fan page 1 hinges at the spread's fore-edge, page d+1 hinges at
+   *  page d's projected outer edge, and each page tilts progressively steeper
+   *  back into the scene (59° → 86°). Because successive pages only ever touch
+   *  at their shared hinge edge — their x-ranges are strictly disjoint — pages
+   *  can NEVER slice under one another (fixes the old z-fighting glitch).
+   *  Depth recession is cheat-scaled for the long-lens reading camera, and
+   *  pages beyond FAN_VISIBLE freeze into a tight edge-on tail tucked behind
+   *  the last visible sliver (exactly like the reference's deepest leaves). */
+  private chainPose(depth: number, left: boolean): { x: number; rec: number; rz: number } {
+    if (depth <= 0) {
+      return left ? { x: 0, rec: 0, rz: Math.PI } : { x: 0, rec: 0, rz: 0 };
+    }
+    const d = Math.min(depth, 30);
+    const ang = (j: number): number => Math.min(FAN_A1 + (j - 1) * FAN_DA, FAN_AMAX);
+    let x = JOURNAL_W;
+    let rec = 0;
+    const steps = Math.min(d, FAN_VISIBLE) - 1;
+    for (let j = 1; j <= steps; j++) {
+      x += JOURNAL_W * Math.cos(ang(j)) + FAN_GAP;
+      rec -= JOURNAL_W * Math.sin(ang(j)) * FAN_RECEDE;
+    }
+    if (d > FAN_VISIBLE) {
+      // tail: freeze into a dense near-edge-on stack behind the last sliver
+      x += 0.0045 * (d - FAN_VISIBLE);
+      rec -= 0.0016 * (d - FAN_VISIBLE);
+    }
+    const a = ang(d);
+    return left ? { x: -x, rec, rz: Math.PI + a } : { x, rec, rz: -a };
+  }
+
+  /** Open-pose target (position + rotation) for sheet index `i` at spread `k`. */
+  private openSheetTarget(
+    i: number,
+    k: number,
+    stackTop: number,
+  ): { x: number; y: number; rz: number } {
+    if (i < k) {
+      const p = this.chainPose(k - 1 - i, true);
+      return { x: p.x, y: COVER_T + (i + 0.5) * SHEET_T + p.rec, rz: p.rz };
+    }
+    const p = this.chainPose(i - k, false);
+    return { x: p.x, y: stackTop - (i + 0.5) * SHEET_T + p.rec, rz: p.rz };
   }
 
   /** Lay out stacks + content planes for a spread. */
@@ -1141,17 +1202,9 @@ export class SketchEngine {
     for (let i = 0; i < S; i++) {
       const mesh = obj.sheets[i];
       mesh.visible = true;
-      if (i < k) {
-        const depth = k - 1 - i; // 0 = top of the left pile
-        const p = this.fanPose(depth, true);
-        mesh.position.set(p.x, COVER_T + (i + 0.5) * SHEET_T, p.z);
-        mesh.rotation.z = p.rz;
-      } else {
-        const depth = i - k; // 0 = top of the right stack
-        const p = this.fanPose(depth, false);
-        mesh.position.set(p.x, stackTop - (i + 0.5) * SHEET_T, p.z);
-        mesh.rotation.z = p.rz;
-      }
+      const t = this.openSheetTarget(i, k, stackTop);
+      mesh.position.set(t.x, t.y, 0);
+      mesh.rotation.z = t.rz;
     }
     // center the open spread on the spine
     obj.offset.position.x = 0;
@@ -1174,13 +1227,14 @@ export class SketchEngine {
     obj.rightContent.position.y = rightTopY + 0.0012;
     applyPageTexture(obj.rightContent, rightIdx, this.textures, this.paperColor);
     obj.rightContent.visible = show && rightIdx < this.pageCount;
-    // show the top fan pages' content faces (the reference fan reveals page
-    // thumbnails at grazing angles — deeper pages degrade to plain edges)
+    // show the fan pages' content faces (the chained fan reads as a cascade
+    // of sketched leaves at grazing angles — like the reference). Left-pile
+    // sheets show their BACKS (sheetBacks), right-fan sheets their tops.
     for (let i = 0; i < S; i++) {
       const face = obj.sheetFaces[i];
       if (!face) continue;
-      const fd = i < k ? k - 1 - i : i - k;
-      face.visible = show && fd <= 3;
+      const fd = i - k; // right-fan depth; left fan pages ride on sheetBacks
+      face.visible = show && fd >= 1 && fd <= FAN_VISIBLE;
     }
     // page backs ride the stacks while reading — they give the standing fan
     // its content slivers (reference shows sketch fragments through the fan)
@@ -1202,34 +1256,34 @@ export class SketchEngine {
     obj.coverPivot.position.y = COVER_T / 2 + 0.0006;
   }
 
-  /** Lay out the static sheet stacks while a sheet is flying. */
-  private layoutStaticSheets(leftCount: number, rightFrom: number, flyingIdx: number, dir: 1 | -1): void {
+  /** Pose the static sheets while a sheet flies. Targets use the chained fan
+   *  at spread `kEff`; the sheets GLIDE from their current transforms to the
+   *  new chain links (the fan flows one step per page turn, like the
+   *  reference) — updateFlip advances this every frame. */
+  private layoutStaticSheets(kEff: number, flyingIdx: number): void {
     const entry = this.openEntry;
     if (!entry) return;
     const obj = entry.obj;
     const { sheets: S } = journalDims(this.pageCount);
     const stackTop = COVER_T + S * SHEET_T;
+    this.flipSheetFrom = [];
+    this.flipSheetTo = [];
     for (let i = 0; i < S; i++) {
-      const mesh = obj.sheets[i];
       if (i === flyingIdx) {
-        mesh.visible = false;
-      } else if (i < leftCount) {
-        mesh.visible = true;
-        const p = this.fanPose(leftCount - 1 - i, true);
-        mesh.position.set(p.x, COVER_T + (i + 0.5) * SHEET_T, p.z);
-        mesh.rotation.z = p.rz;
-      } else if (i >= rightFrom) {
-        mesh.visible = true;
-        const p = this.fanPose(i - rightFrom, false);
-        mesh.position.set(p.x, stackTop - (i + 0.5) * SHEET_T, p.z);
-        mesh.rotation.z = p.rz;
+        this.flipSheetFrom.push(null);
+        this.flipSheetTo.push(null);
+        continue;
       }
+      const mesh = obj.sheets[i];
+      mesh.visible = true;
+      this.flipSheetFrom.push({ x: mesh.position.x, y: mesh.position.y, rz: mesh.rotation.z });
+      this.flipSheetTo.push(this.openSheetTarget(i, kEff, stackTop));
     }
     // the STATIC side's page stays visible while its sheet flies (the flying
     // sheet only replaces the other side) — matches the reference flip where
     // the left page never blanks out
-    obj.leftContent.visible = dir === 1;
-    obj.rightContent.visible = dir === -1;
+    obj.leftContent.visible = this.flip.dir === 1;
+    obj.rightContent.visible = this.flip.dir === -1;
   }
 
   private prepareFlipSheet(k: number, dir: 1 | -1): void {
@@ -1293,6 +1347,17 @@ export class SketchEngine {
     // the underside plane becomes visible once it rotates past vertical
     obj.flipBack.visible = theta > HALF_PI * 1.03;
 
+    // the chained fans flow one link per page turn (glide to their new poses)
+    const eFan = easeInOut(t);
+    for (let i = 0; i < this.flipSheetFrom.length; i++) {
+      const f = this.flipSheetFrom[i];
+      const g = this.flipSheetTo[i];
+      if (!f || !g) continue;
+      const mesh = obj.sheets[i];
+      mesh.position.set(lerp(f.x, g.x, eFan), lerp(f.y, g.y, eFan), 0);
+      mesh.rotation.z = lerp(f.rz, g.rz, eFan);
+    }
+
     // moving shadow that follows the curling page across the spread
     const flipY = COVER_T + (this.flip.dir === 1
       ? (journalDims(this.pageCount).sheets - this.flip.from - 0.5) * SHEET_T
@@ -1352,7 +1417,7 @@ export class SketchEngine {
   private updateOpening(now: number): void {
     const entry = this.openEntry;
     if (!entry) return;
-    const t = clamp01((now - this.transitionStart) / OPEN_DUR);
+    const t = clamp01((now - this.transitionStart) / OPEN_DUR_EFF);
     const obj = entry.obj;
     const root = obj.root;
 
@@ -1416,29 +1481,27 @@ export class SketchEngine {
       easeInOut(clamp01((coverSwing - 0.5) / 0.5)),
     );
 
-    /* --- sheets: closed block → accordion fan → cascade into stacks --- */
+    /* --- sheets: closed block → accordion fan → cascade into chained stacks --- */
     const { sheets: S } = journalDims(this.pageCount);
     const stackTop = COVER_T + S * SHEET_T;
     const fanBaseY = COVER_T + stackTop * 0.42;
     for (let i = 0; i < S; i++) {
       const mesh = obj.sheets[i];
       mesh.visible = true;
-      const left = i < this.spread;
-      const depth = left ? this.spread - 1 - i : i - this.spread;
-      const rest = this.fanPose(depth, left);
-      const restY = left ? COVER_T + (i + 0.5) * SHEET_T : stackTop - (i + 0.5) * SHEET_T;
+      const rest = this.openSheetTarget(i, this.spread, stackTop);
+      const restY = rest.y;
       const closedSlot = stackTop - (i + 0.5) * SHEET_T;
       // bloom angle: top sheet swings far left, bottom trails slightly right
       const u = S <= 1 ? 0.5 : i / (S - 1);
       const bloomAngle = lerp(2.42, -0.52, u);
       const bloomY = fanBaseY + (i - S / 2) * SHEET_T * 1.1;
-      const bloomX = Math.cos(bloomAngle) * JOURNAL_W * 0.22;
-      const bloomZ = Math.sin(bloomAngle) * JOURNAL_W * 0.14;
+      const bloomX = Math.cos(bloomAngle) * JOURNAL_W * 0.09;
+      const bloomZ = Math.sin(bloomAngle) * JOURNAL_W * 0.035;
       if (eGather <= 0) {
         mesh.position.set(lerp(0, bloomX, eBloom), lerp(closedSlot, bloomY, eBloom), lerp(0, bloomZ, eBloom));
         mesh.rotation.z = bloomAngle * eBloom;
       } else {
-        mesh.position.set(lerp(bloomX, rest.x, eGather), lerp(bloomY, restY, eGather), lerp(bloomZ, rest.z, eGather));
+        mesh.position.set(lerp(bloomX, rest.x, eGather), lerp(bloomY, restY, eGather), lerp(bloomZ, 0, eGather));
         mesh.rotation.z = lerp(bloomAngle, rest.rz, eGather);
       }
       const face = obj.sheetFaces[i];
@@ -1536,7 +1599,7 @@ export class SketchEngine {
   private updateClosing(now: number): void {
     const entry = this.openEntry;
     if (!entry) return;
-    const t = clamp01((now - this.transitionStart) / CLOSE_DUR);
+    const t = clamp01((now - this.transitionStart) / CLOSE_DUR_EFF);
     const obj = entry.obj;
     const root = obj.root;
 
@@ -1586,7 +1649,7 @@ export class SketchEngine {
       easeInOut(clamp01((coverSwing - 0.5) / 0.5)),
     );
 
-    /* --- sheets: rest stacks → accordion fan (gather) → closed block --- */
+    /* --- sheets: chained stacks → accordion fan (gather) → closed block --- */
     obj.leftContent.visible = false;
     obj.rightContent.visible = false;
     const { sheets: S } = journalDims(this.pageCount);
@@ -1595,19 +1658,17 @@ export class SketchEngine {
     for (let i = 0; i < S; i++) {
       const mesh = obj.sheets[i];
       mesh.visible = true;
-      const left = i < this.spread;
-      const d = left ? this.spread - 1 - i : i - this.spread;
-      const rest = this.fanPose(d, left);
-      const restY = left ? COVER_T + (i + 0.5) * SHEET_T : stackTop - (i + 0.5) * SHEET_T;
+      const rest = this.openSheetTarget(i, this.spread, stackTop);
+      const restY = rest.y;
       const closedSlot = stackTop - (i + 0.5) * SHEET_T;
       const u = S <= 1 ? 0.5 : i / (S - 1);
       const bloomAngle = lerp(2.42, -0.52, u);
       const bloomY = fanBaseY + (i - S / 2) * SHEET_T * 1.1;
-      const bloomX = Math.cos(bloomAngle) * JOURNAL_W * 0.22;
-      const bloomZ = Math.sin(bloomAngle) * JOURNAL_W * 0.14;
+      const bloomX = Math.cos(bloomAngle) * JOURNAL_W * 0.09;
+      const bloomZ = Math.sin(bloomAngle) * JOURNAL_W * 0.035;
       const gx = lerp(rest.x, bloomX, eGather);
       const gy = lerp(restY, bloomY, eGather);
-      const gz = lerp(rest.z, bloomZ, eGather);
+      const gz = lerp(0, bloomZ, eGather);
       const ga = lerp(rest.rz, bloomAngle, eGather);
       if (eFold <= 0) {
         mesh.position.set(gx, gy, gz);

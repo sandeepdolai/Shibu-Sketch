@@ -21,7 +21,10 @@ export interface SheetUserData {
   restNormals: Float32Array;
 }
 
-/** Rounded-rect shape for one sheet; spine edge (x=0) straight. */
+/** Rounded-rect shape for one sheet; spine edge (x=0) straight.
+ *  Reference pages read as rounded CARDS — all four corners share a
+ *  generous radius (spine corners slightly tighter so the gutter seam
+ *  still tucks together when the book is closed). */
 export function sheetShape(w: number, d: number, foreR: number, spineR: number): THREE.Shape {
   const s = new THREE.Shape();
   s.moveTo(0, spineR);
@@ -42,7 +45,7 @@ export function sheetShape(w: number, d: number, foreR: number, spineR: number):
  * UVs: u = x/w (0 at spine, 1 at fore-edge), v = 0..1 along height.
  */
 export function createSheetSurface(w: number, d: number, cornerR = 0.045): THREE.BufferGeometry {
-  const shape = sheetShape(w, d, cornerR, cornerR * 0.35);
+  const shape = sheetShape(w, d, cornerR, cornerR * 0.55);
   const geo = new THREE.ShapeGeometry(shape, 10);
   // normalize UVs from raw shape coords (x: 0..w, y: 0..d) BEFORE rotating
   const pos = geo.attributes.position as THREE.BufferAttribute;
@@ -68,7 +71,7 @@ export function createSheetSlab(
   t: number,
   cornerR = 0.045,
 ): THREE.BufferGeometry {
-  const shape = sheetShape(w, d, cornerR, cornerR * 0.35);
+  const shape = sheetShape(w, d, cornerR, cornerR * 0.55);
   const geo = new THREE.ExtrudeGeometry(shape, {
     depth: Math.max(1e-4, t),
     bevelEnabled: false,
