@@ -34,7 +34,7 @@ export interface PageGridOverlayProps {
 
 const EXIT_MS = 200;
 const THUMB_W = 220;
-const THUMB_H = 308; // 5:7 — matches the page aspect (620×868)
+const THUMB_H = 400; // 11:20 — matches the page aspect (620×1129)
 
 /** Does the page carry anything at all (used for the "Blank" watermark)? */
 function isBlank(p: PageDTO): boolean {
@@ -179,7 +179,7 @@ export function PageGridOverlay({
                 >
                   <span
                     className={cn(
-                      'relative block aspect-[5/7] w-full overflow-hidden rounded-lg transition-transform duration-300 [transform:rotateX(6deg)] group-hover:[transform:rotateX(0deg)]',
+                      'relative block aspect-[11/20] w-full overflow-hidden rounded-lg transition-transform duration-300 [transform:rotateX(6deg)] group-hover:[transform:rotateX(0deg)]',
                       inSpread
                         ? 'ring-2 ring-white'
                         : 'ring-1 ring-white/15 group-hover:ring-white/40',

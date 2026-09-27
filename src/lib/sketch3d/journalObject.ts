@@ -17,11 +17,14 @@ import { getForeEdgeTexture, getPaperTexture, getShadowBlobTexture, getGutterSha
 
 const HALF_PI = Math.PI / 2;
 
-export const JOURNAL_W = 1.0;
-export const JOURNAL_H = 1.4;
-export const COVER_T = 0.02;
-export const SHEET_T = 0.0032;
-export const SHEET_CORNER = 0.05;
+/* Paper-app journal proportions: tall narrow pocket notebook (w/h ≈ 0.55),
+ * substantial page block (the edge-on fore-edge bar is a signature beat of
+ * the reference open animation). */
+export const JOURNAL_W = 0.78;
+export const JOURNAL_H = 1.42;
+export const COVER_T = 0.026;
+export const SHEET_T = 0.0072;
+export const SHEET_CORNER = 0.055;
 
 export interface JournalDims {
   sheets: number;
@@ -75,6 +78,9 @@ export interface JournalObject {
 export interface BuildJournalOpts {
   pageCount: number;
   coverMaterial: THREE.Material; // cover color/side material
+  /** the spine wrap on the left edge — its own color (white/navy/…)
+   *  like the reference where each journal's spine reads as a distinct band */
+  spineMaterial: THREE.Material;
   coverArtTexture: THREE.Texture | null;
   coverArtMaterial: THREE.MeshPhysicalMaterial; // front face w/ art
   paperColor: string;
@@ -82,7 +88,7 @@ export interface BuildJournalOpts {
 }
 
 export function buildJournal(opts: BuildJournalOpts): JournalObject {
-  const { pageCount, coverMaterial, coverArtTexture, coverArtMaterial, paperColor, textures } = opts;
+  const { pageCount, coverMaterial, spineMaterial, coverArtTexture, coverArtMaterial, paperColor, textures } = opts;
   const { sheets: S, stackTop } = journalDims(pageCount);
   const W = JOURNAL_W;
   const H = JOURNAL_H;
@@ -110,16 +116,16 @@ export function buildJournal(opts: BuildJournalOpts): JournalObject {
   const wellMat = paperMat;
 
   /* -------- back cover -------- */
-  const coverGeo = track(new RoundedBoxGeometry(W, COVER_T, H, 3, 0.006));
+  const coverGeo = track(new RoundedBoxGeometry(W, COVER_T, H, 3, 0.012));
   const backCover = new THREE.Mesh(coverGeo, coverMaterial);
   backCover.position.set(W / 2, COVER_T / 2, 0);
   backCover.castShadow = true;
   backCover.receiveShadow = true;
   offset.add(backCover);
 
-  /* -------- spine (wraps the left edge) -------- */
-  const spineGeo = track(new RoundedBoxGeometry(COVER_T * 1.25, stackTop + COVER_T, H + COVER_T * 0.5, 3, 0.008));
-  const spine = new THREE.Mesh(spineGeo, coverMaterial);
+  /* -------- spine (wraps the left edge, its own band color) -------- */
+  const spineGeo = track(new RoundedBoxGeometry(COVER_T * 1.35, stackTop + COVER_T, H + COVER_T * 0.5, 3, 0.008));
+  const spine = new THREE.Mesh(spineGeo, spineMaterial);
   spine.position.set(-COVER_T * 0.5, (stackTop + COVER_T) / 2, 0);
   spine.userData.isSpine = true;
   spine.castShadow = true;

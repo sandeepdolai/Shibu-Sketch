@@ -113,7 +113,8 @@ export type CoverPattern =
   | 'shapes'
   | 'speckle'
   | 'solar'
-  | 'fruit';
+  | 'fruit'
+  | 'memphis';
 
 export interface CoverStyle {
   kind: CoverKind;

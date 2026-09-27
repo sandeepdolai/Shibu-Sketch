@@ -714,7 +714,7 @@ export default function SketchApp() {
     if (!detail) return;
     const pageIndex = Math.min(spread * 2 + 1, detail.pages.length - 1);
     const content = detail.pages[pageIndex]?.content ?? parsePageContent('{}');
-    const url = contentToDataURL(content, 620, 868, detail.paperColor);
+    const url = contentToDataURL(content, 620, 1129, detail.paperColor);
     if (!url) {
       toast('Could not render page', 'destructive');
       return;
@@ -730,7 +730,7 @@ export default function SketchApp() {
     const left = detail.pages[leftIdx]?.content ?? null;
     const right = detail.pages[rightIdx]?.content ?? null;
     if (!left && !right) return;
-    const url = spreadToDataURL(left, right, 620, 868, detail.paperColor);
+    const url = spreadToDataURL(left, right, 620, 1129, detail.paperColor);
     if (!url) {
       toast('Could not render spread', 'destructive');
       return;

@@ -108,6 +108,7 @@ export const COVER_PATTERNS: readonly CoverPattern[] = [
   'speckle',
   'solar',
   'fruit',
+  'memphis',
 ];
 
 export const COVER_EMOJIS: readonly string[] = [
@@ -262,6 +263,16 @@ export function PatternLayer({ pattern, accent, seed }: PatternLayerProps) {
             />
             <ellipse cx="13.5" cy="5" rx="2.6" ry="1.2" transform="rotate(38 13.5 5)" fill={accent} opacity="0.4" />
             <circle cx="14.5" cy="14" r="2.2" fill={accent} opacity="0.35" />
+          </pattern>
+        )}
+        {pattern === 'memphis' && (
+          <pattern id={pid} width="30" height="30" patternUnits="userSpaceOnUse">
+            <rect width="30" height="30" fill={accent} opacity="0.14" />
+            <path d="M0 15 A15 15 0 0 1 15 0 L15 15 Z" fill={accent} opacity="0.55" />
+            <path d="M15 30 L30 30 L30 15 Z" fill={accent} opacity="0.4" />
+            <circle cx="23" cy="7" r="2" fill={accent} opacity="0.6" />
+            <circle cx="7" cy="23" r="1.3" fill={accent} opacity="0.5" />
+            <circle cx="7" cy="23" r="3.4" fill="none" stroke={accent} strokeWidth="0.8" opacity="0.5" />
           </pattern>
         )}
       </defs>

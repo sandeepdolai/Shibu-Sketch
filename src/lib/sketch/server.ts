@@ -22,7 +22,7 @@ export const coverStyleSchema = z
     color: z.string().min(1),
     color2: z.string().optional(),
     pattern: z
-      .enum(['dots', 'stripes', 'grid', 'leaves', 'shapes', 'speckle', 'solar', 'fruit'])
+      .enum(['dots', 'stripes', 'grid', 'leaves', 'shapes', 'speckle', 'solar', 'fruit', 'memphis'])
       .optional(),
     emoji: z.array(z.string()).optional(),
     title: z.string().optional(),

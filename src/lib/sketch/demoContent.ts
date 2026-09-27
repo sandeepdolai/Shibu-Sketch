@@ -1277,18 +1277,21 @@ const birthdayPages: PageContent[] = [
 export const DEMO_JOURNALS: DemoJournalSeed[] = [
   {
     title: 'Movies',
-    coverStyle: { kind: 'gradient', color: '#e8862e', color2: '#b4551d', title: 'Movies', seed: 7 },
+    // deep charcoal-navy like the reference's lifted journal (cream spine)
+    coverStyle: { kind: 'gradient', color: '#3d425c', color2: '#181c2c', title: 'Movies', seed: 7 },
     paperColor: '#fdf6ec',
     pages: moviesPages,
   },
   {
     title: 'Sketchbook',
-    coverStyle: { kind: 'pattern', color: '#3fae5a', color2: '#2c7a3f', pattern: 'shapes', title: 'Sketchbook', seed: 3 },
+    // the iconic memphis tile mosaic cover
+    coverStyle: { kind: 'pattern', color: '#f3efe4', color2: '#e94f4f', pattern: 'memphis', title: 'Sketchbook', seed: 3 },
     pages: sketchbookPages,
   },
   {
     title: 'Trips',
-    coverStyle: { kind: 'solid', color: '#274060', title: 'Trips', seed: 11 },
+    // solar-system orbit cover on deep teal
+    coverStyle: { kind: 'pattern', color: '#12343b', color2: '#f2c14e', pattern: 'solar', title: 'Trips', seed: 11 },
     pages: tripsPages,
   },
   {

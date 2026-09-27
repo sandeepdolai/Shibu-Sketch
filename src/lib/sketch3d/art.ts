@@ -67,7 +67,7 @@ function grain(ctx: CanvasRenderingContext2D, w: number, h: number, alpha: numbe
 /* ------------------------------------------------------------------ */
 
 export const COVER_TEX_W = 512;
-export const COVER_TEX_H = 716; // 1 x 1.4 aspect
+export const COVER_TEX_H = 932; // 1 x 1.82 aspect (journal 0.78 x 1.42)
 
 function drawPattern(ctx: CanvasRenderingContext2D, style: CoverStyle, w: number, h: number) {
   const rnd = mulberry32(style.seed + 99);
@@ -164,6 +164,74 @@ function drawPattern(ctx: CanvasRenderingContext2D, style: CoverStyle, w: number
         ctx.fill();
       }
       ctx.globalAlpha = 1;
+      break;
+    }
+    /* Memphis-style grid — the iconic Paper-app composition cover: a tile
+     * mosaic of quarter-circles, triangles, dots, rings and squares in a
+     * hot mid-century palette on a warm ground. */
+    case 'memphis': {
+      const pal = ['#e94f4f', '#f2b134', '#2ec4b6', '#ef6f6f', '#123c69', '#f6f2e7', accent];
+      const cols = 3;
+      const rows = 6;
+      const cw = w / cols;
+      const ch = h / rows;
+      for (let r = 0; r < rows; r++) {
+        for (let c = 0; c < cols; c++) {
+          const x = c * cw;
+          const y = r * ch;
+          const rnd2 = mulberry32(style.seed * 31 + r * 17 + c * 7);
+          const kind = Math.floor(rnd2() * 6);
+          const col = pal[Math.floor(rnd2() * pal.length)];
+          ctx.fillStyle = col;
+          switch (kind) {
+            case 0: // quarter circle
+              ctx.beginPath();
+              ctx.moveTo(x, y + ch);
+              ctx.arc(x, y + ch, cw, -Math.PI / 2, 0);
+              ctx.closePath();
+              ctx.fill();
+              break;
+            case 1: // triangle
+              ctx.beginPath();
+              ctx.moveTo(x, y + ch);
+              ctx.lineTo(x + cw, y + ch);
+              ctx.lineTo(x + (rnd2() > 0.5 ? cw : 0), y);
+              ctx.closePath();
+              ctx.fill();
+              break;
+            case 2: {
+              // dot grid
+              ctx.fillStyle = col;
+              for (let dy = 0; dy < 3; dy++) {
+                for (let dx = 0; dx < 3; dx++) {
+                  ctx.beginPath();
+                  ctx.arc(x + cw * (0.22 + dx * 0.28), y + ch * (0.22 + dy * 0.28), cw * 0.055, 0, Math.PI * 2);
+                  ctx.fill();
+                }
+              }
+              break;
+            }
+            case 3: // ring
+              ctx.lineWidth = cw * 0.09;
+              ctx.strokeStyle = col;
+              ctx.beginPath();
+              ctx.arc(x + cw / 2, y + ch / 2, cw * 0.3, 0, Math.PI * 2);
+              ctx.stroke();
+              break;
+            case 4: // half circle standing
+              ctx.beginPath();
+              ctx.arc(x + cw / 2, y + ch, cw / 2, Math.PI, 0);
+              ctx.closePath();
+              ctx.fill();
+              break;
+            default: // solid tile with inner square
+              ctx.fillRect(x + 1, y + 1, cw - 2, ch - 2);
+              ctx.fillStyle = pal[Math.floor(rnd2() * pal.length)];
+              ctx.fillRect(x + cw * 0.3, y + ch * 0.3, cw * 0.4, ch * 0.4);
+              break;
+          }
+        }
+      }
       break;
     }
     case 'solar': {
@@ -365,11 +433,11 @@ export function getPaperTexture(): THREE.CanvasTexture {
   if (paperTex) return paperTex;
   const S = 256;
   const [canvas, ctx] = makeCanvas(S, S);
-  ctx.fillStyle = '#f7f4ec';
+  ctx.fillStyle = '#fbf9f4';
   ctx.fillRect(0, 0, S, S);
   const rnd = mulberry32(7);
-  for (let i = 0; i < 900; i++) {
-    ctx.fillStyle = rnd() > 0.5 ? 'rgba(255,255,255,0.5)' : 'rgba(120,110,90,0.06)';
+  for (let i = 0; i < 700; i++) {
+    ctx.fillStyle = rnd() > 0.5 ? 'rgba(255,255,255,0.6)' : 'rgba(140,128,105,0.045)';
     ctx.fillRect(rnd() * S, rnd() * S, 1.5, 1.5);
   }
   // faint fibers
@@ -395,12 +463,12 @@ let stripeTex: THREE.CanvasTexture | null = null;
 export function getForeEdgeTexture(): THREE.CanvasTexture {
   if (stripeTex) return stripeTex;
   const [canvas, ctx] = makeCanvas(64, 256);
-  ctx.fillStyle = '#efe9dc';
+  ctx.fillStyle = '#f6f2e9';
   ctx.fillRect(0, 0, 64, 256);
   const rnd = mulberry32(21);
   for (let y = 0; y < 256; y += 2) {
-    const v = 226 + Math.floor(rnd() * 24);
-    ctx.fillStyle = `rgb(${v},${v - 4},${v - 12})`;
+    const v = 234 + Math.floor(rnd() * 20);
+    ctx.fillStyle = `rgb(${v},${v - 3},${v - 9})`;
     ctx.fillRect(0, y, 64, 1.4);
   }
   stripeTex = new THREE.CanvasTexture(canvas);
