@@ -63,18 +63,36 @@ export function createSheetSurface(w: number, d: number, cornerR = 0.045): THREE
 
 /**
  * Sheet slab with real thickness (extruded rounded rect), XZ plane.
- * material index 0 = top/bottom caps, 1 = side walls (fore-edge stripes).
+ * Acan3d-quality card body: the extrusion carries a soft bevel so the
+ * fore-edge and face transitions read as rounded card edges (the reference
+ * pages are thick rounded CARDS, not razor planes).
+ *
+ * material index 0 = top/bottom caps, 1 = side walls (fore-edge striations).
+ *
+ * `edgeTileLen` controls how often the striation texture repeats along the
+ * wall contour; `edgeLines` is documentation-only (baked into the texture).
+ * Side-wall UVs are rebuilt here: u = arclength tiles along the contour,
+ * v = 0..1 across the full thickness — so the striation texture renders one
+ * slab's edge band correctly (the old pass flattened it to a single color).
  */
 export function createSheetSlab(
   w: number,
   d: number,
   t: number,
   cornerR = 0.045,
+  edgeTileLen = 0.09,
 ): THREE.BufferGeometry {
   const shape = sheetShape(w, d, cornerR, cornerR * 0.55);
+  // bevel budget: keep total thickness == t (depth + 2*bevelThickness)
+  const bevT = Math.min(t * 0.3, cornerR * 0.35);
+  const bevS = Math.min(bevT * 0.85, cornerR * 0.28);
+  const depth = Math.max(1e-4, t - bevT * 2);
   const geo = new THREE.ExtrudeGeometry(shape, {
-    depth: Math.max(1e-4, t),
-    bevelEnabled: false,
+    depth,
+    bevelEnabled: bevT > 1e-4 && depth > 1e-4,
+    bevelThickness: bevT,
+    bevelSize: bevS,
+    bevelSegments: 2,
     curveSegments: 8,
   });
   const pos = geo.attributes.position as THREE.BufferAttribute;
@@ -87,9 +105,38 @@ export function createSheetSlab(
   }
   geo.rotateX(-Math.PI / 2);
   geo.translate(0, 0, d / 2);
+  geo.computeBoundingBox();
   // keep ExtrudeGeometry's built-in groups: 0 = caps, 1 = side walls
+  rebuildSlabWallUVs(geo, t, edgeTileLen);
   cacheRestPose(geo, w, d);
   return geo;
+}
+
+/** Rebuild group-1 (side wall) UVs: u tiles along the contour, v spans the
+ *  slab thickness. Runs AFTER the XZ rotation, so wall y ∈ [0, t]. */
+function rebuildSlabWallUVs(geo: THREE.BufferGeometry, t: number, tileLen: number): void {
+  const uv = geo.attributes.uv as THREE.BufferAttribute | undefined;
+  const pos = geo.attributes.position as THREE.BufferAttribute;
+  if (!uv) return;
+  const wallSet = new Set<number>();
+  for (const group of geo.groups) {
+    if (group.materialIndex !== 1) continue;
+    for (let k = group.start; k < group.start + group.count; k++) {
+      const idx = geo.index ? geo.index.getX(k) : k;
+      wallSet.add(idx);
+    }
+  }
+  if (wallSet.size === 0) return;
+  const zMax = geo.boundingBox?.max.z ?? 0;
+  for (const idx of wallSet) {
+    const px = pos.getX(idx);
+    const py = pos.getY(idx);
+    const pz = pos.getZ(idx);
+    // continuous contour coordinate (x and z both follow the outline)
+    const u = (px - pz + zMax) / Math.max(1e-4, tileLen);
+    uv.setXY(idx, u, t > 1e-5 ? py / t : 0);
+  }
+  uv.needsUpdate = true;
 }
 
 /** Cache the undeformed pose so bendSheet can restart every frame. */

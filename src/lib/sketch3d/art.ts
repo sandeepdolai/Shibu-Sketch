@@ -477,6 +477,59 @@ export function getForeEdgeTexture(): THREE.CanvasTexture {
   return stripeTex;
 }
 
+let sheetEdgeTex: THREE.CanvasTexture | null = null;
+/**
+ * Striated sheet-edge band for the slab side walls (the reference close-up
+ * shows every sheet edge as its own fine line). UV contract from
+ * createSheetSlab: u tiles along the page contour, v = 0..1 across ONE
+ * slab's thickness — so this tile bakes that single slab's edge: soft face
+ * shading at both faces, 2 hairline "sheet boundary" lines + paper grain.
+ * Real air gaps between neighbouring slabs add the darker seam lines, so
+ * the closed block reads as dozens of stacked sheet edges (geometry, not
+ * just texture).
+ */
+export function getSheetEdgeTexture(): THREE.CanvasTexture {
+  if (sheetEdgeTex) return sheetEdgeTex;
+  const W = 128;
+  const H = 64;
+  const [canvas, ctx] = makeCanvas(W, H);
+  // warm cream paper edge
+  ctx.fillStyle = '#f3eee1';
+  ctx.fillRect(0, 0, W, H);
+  // face-adjacent shading: bright near both faces, contact shadow mid-slab
+  const g = ctx.createLinearGradient(0, 0, 0, H);
+  g.addColorStop(0, 'rgba(255,255,255,0.55)');
+  g.addColorStop(0.18, 'rgba(255,255,255,0.08)');
+  g.addColorStop(0.5, 'rgba(118,108,86,0.14)');
+  g.addColorStop(0.82, 'rgba(255,255,255,0.08)');
+  g.addColorStop(1, 'rgba(255,255,255,0.5)');
+  ctx.fillStyle = g;
+  ctx.fillRect(0, 0, W, H);
+  const rnd = mulberry32(47);
+  // two hairline sheet boundaries + a faint third (per-slab micro layers)
+  for (const [fy, a] of [
+    [0.3, 0.42],
+    [0.66, 0.36],
+    [0.86, 0.2],
+  ] as const) {
+    const y = H * fy + (rnd() - 0.5) * 2;
+    ctx.fillStyle = `rgba(98,90,72,${a})`;
+    ctx.fillRect(0, y, W, 1.3);
+    ctx.fillStyle = 'rgba(255,255,255,0.45)';
+    ctx.fillRect(0, y + 1.5, W, 1);
+  }
+  // grain
+  for (let i = 0; i < 260; i++) {
+    ctx.fillStyle = rnd() > 0.5 ? 'rgba(255,255,255,0.5)' : 'rgba(120,110,88,0.12)';
+    ctx.fillRect(rnd() * W, rnd() * H, 1, 1);
+  }
+  sheetEdgeTex = new THREE.CanvasTexture(canvas);
+  sheetEdgeTex.colorSpace = THREE.SRGBColorSpace;
+  sheetEdgeTex.wrapS = sheetEdgeTex.wrapT = THREE.RepeatWrapping;
+  sheetEdgeTex.anisotropy = 8;
+  return sheetEdgeTex;
+}
+
 let blobTex: THREE.CanvasTexture | null = null;
 /** Soft radial shadow blob (used under journals and the open book). */
 export function getShadowBlobTexture(): THREE.CanvasTexture {

@@ -7,33 +7,58 @@
  * `stand` pivot by +PI/2 about X makes it stand upright facing the camera
  * (shelf pose). Opening the front cover = rotating its pivot around local Z.
  *
+ * REMODEL (Acan3d book-generator model): the book block is rebuilt with the
+ * same parameter philosophy as Acan3d's `buildBook` (pageThickness, pageGap,
+ * coverOverhang) —
+ *  - every sheet is a THICK rounded card (visible thickness everywhere),
+ *  - sheets are separated by REAL air gaps (pageGap) so the closed fore-edge
+ *    reads as dozens of stacked sheet edges (geometry, not texture),
+ *  - the page block is INSET within the covers (coverOverhang) so cover
+ *    margin shows around the block like the reference close-ups,
+ *  - slots tile exactly: each slab occupies [origin, origin + t] with air
+ *    gaps between — zero coplanar surfaces, zero interpenetration.
+ *
  * Layers (bottom -> top): back cover, sheet stack (all sheets, individually
  * placeable), front cover pivot, spread content planes, flipping sheet group.
  */
 import * as THREE from 'three';
 import { RoundedBoxGeometry } from 'three/examples/jsm/geometries/RoundedBoxGeometry.js';
-import { createSheetSurface, createSheetSlab } from './sheetGeom';
-import { getForeEdgeTexture, getPaperTexture, getShadowBlobTexture, getGutterShadowTexture } from './art';
+import { createSheetSurface, createSheetSlab, cacheRestPose } from './sheetGeom';
+import { getSheetEdgeTexture, getPaperTexture, getShadowBlobTexture, getGutterShadowTexture } from './art';
 
 const HALF_PI = Math.PI / 2;
 
 /* Paper-app journal proportions: tall narrow pocket notebook (w/h ≈ 0.55),
- * substantial page block (the edge-on fore-edge bar is a signature beat of
- * the reference open animation). */
+ * with the Acan3d book-generator's chunky page block. */
 export const JOURNAL_W = 0.78;
 export const JOURNAL_H = 1.42;
-export const COVER_T = 0.026;
-export const SHEET_T = 0.0072;
-export const SHEET_CORNER = 0.055;
+export const COVER_T = 0.028;
+/** Acan3d pageThickness equivalent — a chunky card page (was 0.0072). */
+export const SHEET_T = 0.013;
+/** Acan3d pageGap equivalent — real air gap between sheet edges; this is
+ *  what draws the dark hairline seams of the striated fore-edge. */
+export const SHEET_GAP = 0.0034;
+export const SHEET_PITCH = SHEET_T + SHEET_GAP;
+export const SHEET_CORNER = 0.05;
+/** Acan3d coverOverhang equivalents — the page block sits INSET within the
+ *  covers: fore-edge, top and bottom all keep a cover margin. */
+export const PAGE_INSET_F = 0.02;
+export const PAGE_INSET_TB = 0.018;
+/** spine-side inset (hidden inside the spine wrap). */
+export const PAGE_INSET_S = 0.004;
+export const SHEET_W = JOURNAL_W - PAGE_INSET_F - PAGE_INSET_S;
+export const SHEET_H = JOURNAL_H - PAGE_INSET_TB * 2;
+/** the left pile rides a hair above the opened front cover (glitch-free). */
+export const PILE_LIFT = 0.0012;
 
 export interface JournalDims {
   sheets: number;
-  stackTop: number; // y of the top of the sheet stack
+  stackTop: number; // y of the top face of the top sheet (closed block)
 }
 
 export function journalDims(pageCount: number): JournalDims {
   const sheets = Math.max(1, Math.ceil(pageCount / 2));
-  return { sheets, stackTop: COVER_T + sheets * SHEET_T };
+  return { sheets, stackTop: COVER_T + sheets * SHEET_T + (sheets - 1) * SHEET_GAP };
 }
 
 export interface PageTextureProvider {
@@ -110,10 +135,22 @@ export function buildJournal(opts: BuildJournalOpts): JournalObject {
   const paperMat = track(
     new THREE.MeshStandardMaterial({ color: paperColor, map: getPaperTexture(), roughness: 0.92 }),
   );
-  const edgeMat = track(
-    new THREE.MeshStandardMaterial({ map: getForeEdgeTexture(), roughness: 0.95 }),
+  // three subtly different edge tones cycle across the block — each card
+  // edge catches light differently (like the reference's stacked pages)
+  const edgeTex = getSheetEdgeTexture();
+  const edgeMats = ['#ffffff', '#f2ede0', '#e7e1d1'].map((c) =>
+    track(new THREE.MeshStandardMaterial({ color: c, map: edgeTex, roughness: 0.95 })),
   );
   const wellMat = paperMat;
+
+  /* -------- sheet geometry (shared) --------
+   * The slab's spine edge is BAKED at local x = PAGE_INSET_S so every sheet
+   * mesh pivots exactly on the book spine (rotations/fans swing the true
+   * spine line) while the block stays inset from the cover edges. */
+  const slabGeo = track(createSheetSlab(SHEET_W, SHEET_H, SHEET_T, SHEET_CORNER));
+  slabGeo.translate(PAGE_INSET_S, 0, 0);
+  slabGeo.computeBoundingBox();
+  cacheRestPose(slabGeo, PAGE_INSET_S + SHEET_W, SHEET_H);
 
   /* -------- back cover -------- */
   const coverGeo = track(new RoundedBoxGeometry(W, COVER_T, H, 3, 0.012));
@@ -123,7 +160,7 @@ export function buildJournal(opts: BuildJournalOpts): JournalObject {
   backCover.receiveShadow = true;
   offset.add(backCover);
 
-  /* -------- spine (wraps the left edge, its own band color) -------- */
+  /* -------- spine (wraps the left edge + block's top/bottom, own band color) */
   const spineGeo = track(new RoundedBoxGeometry(COVER_T * 1.35, stackTop + COVER_T, H + COVER_T * 0.5, 3, 0.008));
   const spine = new THREE.Mesh(spineGeo, spineMaterial);
   spine.position.set(-COVER_T * 0.5, (stackTop + COVER_T) / 2, 0);
@@ -132,19 +169,20 @@ export function buildJournal(opts: BuildJournalOpts): JournalObject {
   offset.add(spine);
 
   /* -------- sheet stack --------
-   * Slot heights: in the closed book sheet 0 is the TOP sheet (just under
-   * the front cover): y = stackTop - (i+0.5)*t. Turned sheets re-pile on the
-   * opened front cover from the bottom: y = COVER_T + (i+0.5)*t. */
-  const slabGeo = track(createSheetSlab(W, H, SHEET_T, SHEET_CORNER));
-  const slotY = (i: number, left: boolean): number =>
-    left ? COVER_T + (i + 0.5) * SHEET_T : stackTop - (i + 0.5) * SHEET_T;
+   * Exact tiling (zero coplanar faces, zero overlap):
+   *  right/closed: sheet i (0 = TOP, under the front cover) occupies
+   *    [stackTop - (i+1)*t - i*gap, stackTop - i*t - i*gap]
+   *  left pile (flipped sheets, slab hangs BELOW its origin):
+   *    sheet i occupies [PILE_LIFT + COVER_T + i*pitch, + t]  */
+  const slotY = (i: number): number => stackTop - (i + 1) * SHEET_T - i * SHEET_GAP;
   const sheets: THREE.Mesh[] = [];
   const sheetFaces: THREE.Mesh[] = [];
   const sheetBacks: THREE.Mesh[] = [];
-  const faceGeo = track(new THREE.PlaneGeometry(W * 0.985, H * 0.985));
+  const faceGeo = track(new THREE.PlaneGeometry(SHEET_W * 0.99, SHEET_H * 0.99));
+  const faceX = PAGE_INSET_S + SHEET_W / 2;
   for (let i = 0; i < S; i++) {
-    const m = new THREE.Mesh(slabGeo, [paperMat, edgeMat]);
-    m.position.y = slotY(i, false);
+    const m = new THREE.Mesh(slabGeo, [paperMat, edgeMats[i % edgeMats.length]]);
+    m.position.y = slotY(i);
     m.castShadow = true;
     m.receiveShadow = true;
     offset.add(m);
@@ -161,7 +199,7 @@ export function buildJournal(opts: BuildJournalOpts): JournalObject {
     );
     const face = new THREE.Mesh(faceGeo, faceMat);
     face.rotation.x = -HALF_PI;
-    face.position.set(W / 2, SHEET_T + 0.0006, 0);
+    face.position.set(faceX, SHEET_T + 0.0006, 0);
     face.visible = false;
     face.castShadow = false;
     face.receiveShadow = false;
@@ -179,7 +217,7 @@ export function buildJournal(opts: BuildJournalOpts): JournalObject {
     );
     const back = new THREE.Mesh(faceGeo, backMat);
     back.rotation.x = -HALF_PI;
-    back.position.set(W / 2, -0.0006, 0);
+    back.position.set(faceX, -0.0006, 0);
     back.visible = false;
     back.castShadow = false;
     back.receiveShadow = false;
@@ -201,12 +239,12 @@ export function buildJournal(opts: BuildJournalOpts): JournalObject {
   artMesh.rotation.x = -HALF_PI;
   artMesh.position.set(W / 2, COVER_T / 2 + 0.0009, 0);
   coverPivot.add(artMesh);
-  // paper liner on the inside of the front cover
-  const linerGeo = track(createSheetSurface(W, H, SHEET_CORNER));
+  // paper liner on the inside of the front cover (sits close to the box so
+  // the opened cover never pokes into the left pile)
+  const linerGeo = track(createSheetSurface(W * 0.99, H * 0.995, SHEET_CORNER));
   const liner = new THREE.Mesh(linerGeo, wellMat);
-  liner.rotation.z = 0;
   liner.rotation.x = Math.PI; // face down (inside of cover)
-  liner.position.y = -COVER_T / 2 - 0.0006;
+  liner.position.set(W / 2, -COVER_T / 2 - 0.0002, 0);
   liner.receiveShadow = true;
   coverPivot.add(liner);
 
@@ -215,8 +253,20 @@ export function buildJournal(opts: BuildJournalOpts): JournalObject {
     coverArtMaterial.needsUpdate = true;
   }
 
-  /* -------- spread content planes + wells -------- */
-  const surfaceGeo = track(createSheetSurface(W, H, SHEET_CORNER));
+  /* -------- spread content planes + wells --------
+   * Content planes match the inset sheet size and are baked at the sheet's
+   * spine offset, so they line up with the page block edge-for-edge. */
+  const rightContentGeo = track(createSheetSurface(SHEET_W, SHEET_H, SHEET_CORNER));
+  rightContentGeo.translate(PAGE_INSET_S, 0, 0);
+  const leftContentGeo = track(createSheetSurface(SHEET_W, SHEET_H, SHEET_CORNER));
+  leftContentGeo.rotateY(Math.PI);
+  {
+    const uv = leftContentGeo.attributes.uv as THREE.BufferAttribute;
+    for (let i = 0; i < uv.count; i++) uv.setX(i, 1 - uv.getX(i));
+    uv.needsUpdate = true;
+  }
+  leftContentGeo.translate(-PAGE_INSET_S, 0, 0);
+  const wellGeo = track(createSheetSurface(W * 0.995, H * 0.998, SHEET_CORNER));
   const mkSurface = (geo: THREE.BufferGeometry): THREE.Mesh => {
     const mat = track(
       new THREE.MeshStandardMaterial({
@@ -229,29 +279,27 @@ export function buildJournal(opts: BuildJournalOpts): JournalObject {
     mesh.receiveShadow = true;
     return mesh;
   };
-  // left-page geometry: mirrored around Y so the front face still points up,
-  // then u flipped so image-left lands on the page's outer (left) edge
-  const leftGeo = track(createSheetSurface(W, H, SHEET_CORNER));
-  leftGeo.rotateY(Math.PI);
-  {
-    const uv = leftGeo.attributes.uv as THREE.BufferAttribute;
-    for (let i = 0; i < uv.count; i++) uv.setX(i, 1 - uv.getX(i));
-    uv.needsUpdate = true;
-  }
-  const leftContent = mkSurface(leftGeo);
-  const rightContent = mkSurface(surfaceGeo);
-  const leftWell = mkSurface(leftGeo);
-  const rightWell = mkSurface(surfaceGeo);
+  const leftContent = mkSurface(leftContentGeo);
+  const rightContent = mkSurface(rightContentGeo);
+  const leftWell = mkSurface(wellGeo);
+  const rightWell = mkSurface(wellGeo);
   offset.add(leftContent, rightContent, leftWell, rightWell);
 
   /* -------- flipping sheet (dedicated geometries: these get bent) -------- */
   const flipGroup = new THREE.Group();
   flipGroup.visible = false;
   offset.add(flipGroup);
-  const flipEdgeGeo = track(createSheetSlab(W, H, SHEET_T, SHEET_CORNER));
-  const flipFrontGeo = track(createSheetSurface(W, H, SHEET_CORNER));
-  const flipBackGeo = track(createSheetSurface(W, H, SHEET_CORNER));
-  const flipEdge = new THREE.Mesh(flipEdgeGeo, [paperMat, edgeMat]);
+  const flipEdgeGeo = track(createSheetSlab(SHEET_W, SHEET_H, SHEET_T, SHEET_CORNER));
+  flipEdgeGeo.translate(PAGE_INSET_S, 0, 0);
+  flipEdgeGeo.computeBoundingBox();
+  cacheRestPose(flipEdgeGeo, PAGE_INSET_S + SHEET_W, SHEET_H);
+  const flipFrontGeo = track(createSheetSurface(SHEET_W, SHEET_H, SHEET_CORNER));
+  flipFrontGeo.translate(PAGE_INSET_S, 0, 0);
+  cacheRestPose(flipFrontGeo, PAGE_INSET_S + SHEET_W, SHEET_H);
+  const flipBackGeo = track(createSheetSurface(SHEET_W, SHEET_H, SHEET_CORNER));
+  flipBackGeo.translate(PAGE_INSET_S, 0, 0);
+  cacheRestPose(flipBackGeo, PAGE_INSET_S + SHEET_W, SHEET_H);
+  const flipEdge = new THREE.Mesh(flipEdgeGeo, [paperMat, edgeMats[1]]);
   const flipFrontMat = track(
     new THREE.MeshStandardMaterial({ color: paperColor, map: getPaperTexture(), roughness: 0.92 }),
   );
